@@ -24,22 +24,30 @@ static int skip_seq_check(struct nl_msg *msg, void *arg)
 	return NL_OK;
 }
 
-static int entry_message(struct nl_msg *msg, void *arg){
-    printf("Received a message \n");
+static int message_entry(struct nl_msg *msg, void *arg){
+    printf("Received message: \n");
     return NL_OK;
 }
-static int print_rx_msg(struct nl_msg *msg, void* arg)
+static int callback_handler(struct nl_msg *msg, void* arg)
 {
 	struct nlattr *attr[GENL_TEST_ATTR_MAX+1];
 
 	genlmsg_parse(nlmsg_hdr(msg), 0, attr, GENL_TEST_ATTR_MAX, genl_test_policy);
 
-	if (!attr[GENL_TEST_ATTR_MSG]) {
-		fprintf(stdout, "Kernel sent empty message!!\n");
+    if(!nla_get_flag(attr[RET_VAL_SUCCESS])){
+        printf("***************************Encountered an error***************************\n");
+        if(attr[OPTIONAL_ERROR_MESSAGE]){
+            printf("The Following error occured: %s \n", nla_get_string(attr[OPTIONAL_ERROR_MESSAGE]));
+        }
+        return -1;
+    }
+
+	if (!attr[CALLBACK_IDENTIFIER]) {
+		fprintf(stdout, "\t\t\t\tKernel sent empty message!!\n");
 		return NL_OK;
 	}
 
-	fprintf(stdout, "Kernel says: %s \n", nla_get_string(attr[GENL_TEST_ATTR_MSG]));
+    printf("\t\t\t\tEntering the data \n");
 	return NL_OK;
 }
 
@@ -50,7 +58,6 @@ int main() {
     int group_id;
 
     int family_num;
-    int ret;
     /*Initializing the netlink socket*/
     netlink_socket = nl_socket_alloc();
 
@@ -73,7 +80,7 @@ int main() {
         return -1;
     }
 
-    /*resolve group*/
+    /*resolve generic group*/
     group_id = genl_ctrl_resolve_grp(netlink_socket, NETLINK_FAMILY_NAME, genl_test_mcgrp_names[0]);
 
     if(group_id < 0){
@@ -91,85 +98,39 @@ int main() {
         printf("Failed to allocate message \n");
         return -1;
     }
-    /*
-    * msg -> Message to be sent
-    * NL_AUTO_PORT - Netlink port to be set by the netlink socket before sending
-    * NL_AUTO_SEQ - Sequence number which should be set automatically
-    * family_num - Registered familyid
-    * headerLength - 0
-    * Additional Flags
-    * cmd - message specific command
-    * version - Interface version
-    */
-    // if(!genlmsg_put(msg, NL_AUTO_PID, NL_AUTO_SEQ, family_num, 0, NLM_F_REQUEST, GENL_TEST_C_MSG, 0)){
-    //     printf("Failed to put netlink header. Exiting... \n");
-    //     return -1;
-    // }
 
-    // ret = nla_put_string(msg, GENL_TEST_ATTR_MSG, messageBuffer);
-    // if(ret){
-    //     printf("Failed to put nl string. Exiting... \n");
-    //     return -1;
-    // }
-
-
-    // ret = nla_put_string(msg, 20, messageBuffer);
-    // if(ret){
-    //     printf("Failed to put nl string. Exiting... \n");
-    //     return -1;
-    // }
-
-    /* 
-    * nl_send_auto(struct *nl_sock, struct *nl_msg) 
-    * Finalize and Transmit Netlink message 
-    */
-    ret = nl_send_auto(netlink_socket, msg);
-    if(ret < 0){    
-        printf("Failed to send message. Exiting... \n");
+    if(!genlmsg_put(msg, NL_AUTO_PID, NL_AUTO_SEQ, family_num, 0, NLM_F_REQUEST, CONFIGURE_DEVICE, 0)){
+        printf("Failed to put netlink header. Exiting... \n");
         return -1;
-    }   
+    }
+
+    nla_put_u32(msg, HCSR04_ECHO_PIN, USER_HCSR04_ECHO_PIN);
+    nla_put_u32(msg, HCSR04_TRIGGER_PIN, USER_HCSR04_TRIGGER_PIN);
+    nla_put_u32(msg, HCSR04_SAMPLING_PERIOD,USER_SAMPLING_PERIOD);
+    nla_put_u32(msg, HCSRO4_NUMBER_SAMPLES, USER_NUM_SAMPLES);
+
+    nl_send_auto(netlink_socket, msg);
 
     /* prep the cb */
 	cb = nl_cb_alloc(NL_CB_DEFAULT);
 	nl_cb_set(cb, NL_CB_SEQ_CHECK, NL_CB_CUSTOM, skip_seq_check, NULL);
-    nl_cb_set(cb, NL_CB_MSG_IN, NL_CB_CUSTOM, entry_message, NULL);
-	nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, print_rx_msg, NULL);
+    nl_cb_set(cb, NL_CB_MSG_IN, NL_CB_CUSTOM, message_entry, NULL);
+	nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, callback_handler, NULL);
 	
-	ret = nl_recvmsgs(netlink_socket, cb);
-    
-    if(!ret){
-        nlmsg_free(msg);
-        msg = nlmsg_alloc();
-        if(!genlmsg_put(msg, NL_AUTO_PID, NL_AUTO_SEQ, family_num, 0, NLM_F_REQUEST, CONFIGURE_DEVICE, 0)){
-            printf("Failed to put netlink header. Exiting... \n");
-            return -1;
-        }
-
-        nla_put_u32(msg, HCSR04_ECHO_PIN, USER_HCSR04_ECHO_PIN);
-        nla_put_u32(msg, HCSR04_TRIGGER_PIN, USER_HCSR04_TRIGGER_PIN);
-        nla_put_u32(msg, HCSR04_SAMPLING_PERIOD,USER_SAMPLING_PERIOD);
-        nla_put_u32(msg, HCSRO4_NUMBER_SAMPLES, USER_NUM_SAMPLES);
-
-        nl_send_auto(netlink_socket, msg);
-    }else{
-
+    if(nl_recvmsgs(netlink_socket, cb)){
+        goto failure;
     }
 
-    ret = nl_recvmsgs(netlink_socket, cb);
+    nl_send_auto(netlink_socket, msg);
 
-    if(!ret){
-
-    }else{
-
+    if(nl_recvmsgs(netlink_socket, cb)){
+        goto failure;
     }
-
 	nl_cb_put(cb);
 
+failure:
     /* Destroying the message */
     nlmsg_free(msg);
-    
-
-    /*Preparing for the callback*/
 
     /* Destroy the socket */
     nl_socket_free(netlink_socket);

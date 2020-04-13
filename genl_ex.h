@@ -22,7 +22,6 @@
 
 enum {
 	GENL_TEST_C_UNSPEC,		/* Must NOT use element 0 */
-	GENL_TEST_C_MSG,
 	CONFIGURE_DEVICE,
 	INITIATE_MEASUREMENT,
 	DISPLAY_PATTERN
@@ -36,31 +35,22 @@ static char* genl_test_mcgrp_names[GENL_TEST_MCGRP_MAX] = {
 	MULTICAST_GROUP2
 };
 
-struct sample{
-	int data;
-	int data2;
-};
 enum genl_test_attrs {
 	GENL_TEST_ATTR_UNSPEC,		/* Must NOT use element 0 */
-	GENL_TEST_ATTR_MSG,
 	HCSR04_ECHO_PIN,
 	HCSR04_TRIGGER_PIN,
 	HCSR04_SAMPLING_PERIOD,
 	HCSRO4_NUMBER_SAMPLES,
 	CALLBACK_IDENTIFIER,
+	RET_VAL_SUCCESS,
+	RET_VAL_FAILURE,
+	OPTIONAL_ERROR_MESSAGE,
 	__GENL_TEST_ATTR__MAX
 };
+
 #define GENL_TEST_ATTR_MAX (__GENL_TEST_ATTR__MAX - 1)
 
 static struct nla_policy genl_test_policy[GENL_TEST_ATTR_MAX+1] = {
-	[GENL_TEST_ATTR_MSG] = {
-		.type = NLA_STRING,
-#ifdef __KERNEL__
-		.len = MAX_BUF_LENGTH
-#else
-		.maxlen = MAX_BUF_LENGTH
-#endif
-	},
 	[HCSR04_ECHO_PIN] = {
 		.type = NLA_U32
 	},
@@ -75,6 +65,20 @@ static struct nla_policy genl_test_policy[GENL_TEST_ATTR_MAX+1] = {
 	},
 	[CALLBACK_IDENTIFIER] = {
 		.type = NLA_U32
+	},
+	[RET_VAL_FAILURE] = {
+		.type = NLA_FLAG
+	},
+	[RET_VAL_SUCCESS] = {
+		.type = NLA_FLAG
+	},
+	[OPTIONAL_ERROR_MESSAGE] ={
+		.type = NLA_STRING,
+#ifdef __KERNEL__
+		.len = MAX_BUF_LENGTH
+#else
+		.maxlen = MAX_BUF_LENGTH
+#endif
 	}
 };
 

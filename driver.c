@@ -33,26 +33,26 @@ static struct spi_device_id spi_deviceId_table[]={
     {"MAX7219", 0}
 };
 
-static void manage_messages(unsigned int group){
+static void send_message_to_user_processes(unsigned int group){
     void *header;
     int res, flags = GFP_ATOMIC;
     char msg[MAX_BUF_LENGTH];
     struct sk_buff* sk_buf = genlmsg_new(NLMSG_DEFAULT_SIZE, flags);
 
     if (!sk_buf) {
-        printk(KERN_ERR "%d: OOM!!", __LINE__);
+        DALERT("Failed to create a new generic message. \n");
         return;
     }
 
     header = genlmsg_put(sk_buf, 0, 0, &genl_netlink_family, flags, CONFIGURE_DEVICE);
     if (!header) {
-        printk(KERN_ERR "%d: Unknown err !", __LINE__);
+        DALERT("Error in creating the sk_buf header \n");
         goto nlmsg_fail;
     }
 
     snprintf(msg, MAX_BUF_LENGTH, "Hello group %s\n", genl_test_mcgrp_names[group]);
-
-    res = nla_put_string(sk_buf, GENL_TEST_ATTR_MSG, msg);
+    nla_put_flag(sk_buf, RET_VAL_SUCCESS);
+    res = nla_put_string(sk_buf, CALLBACK_IDENTIFIER, msg);
     if (res) {
         printk(KERN_ERR "%d: err %d ", __LINE__, res);
         goto nlmsg_fail;
@@ -66,23 +66,6 @@ nlmsg_fail:
     genlmsg_cancel(sk_buf, header);
     nlmsg_free(sk_buf);
     return;
-}
-
-static int genl_netlink_rx_msg(struct sk_buff* sk_buf, struct genl_info* info)
-{
-    struct sample *buf ;
-    if (!info->attrs[1]) {
-        printk(KERN_ERR "empty message from %d!!\n",
-            info->snd_portid);
-        printk(KERN_ERR "%p\n", info->attrs[1]);
-        return -EINVAL;
-    }
-    buf = (struct sample *)nla_data(info->attrs[1]);
-    printk(KERN_NOTICE "%u says %d \n", info->snd_portid,
-        buf->data2);
-    
-    manage_messages(GROUP0);
-    return 0;
 }
 
 static int configure_device (struct sk_buff* sk_buf, struct genl_info* info){
@@ -99,7 +82,7 @@ static int configure_device (struct sk_buff* sk_buf, struct genl_info* info){
     num_samples = nla_get_u32(info->attrs[HCSRO4_NUMBER_SAMPLES]);
 
     DALERT("%d  %d  %d  %d\n", echo_pin, trigger_pin, sampling_period, num_samples);
-    manage_messages(GROUP0);
+    send_message_to_user_processes(GROUP0);
     return 0;
 }
 
@@ -113,12 +96,6 @@ static int send_pattern_to_matrix_led (struct sk_buff* sk_buf, struct genl_info*
     return 0;
 }
 static const struct genl_ops genl_netlink_ops[] = {
-    {
-        .cmd = GENL_TEST_C_MSG,
-        .policy = genl_test_policy,
-        .doit = genl_netlink_rx_msg,
-        .dumpit = NULL,
-    },
     {
         .cmd = CONFIGURE_DEVICE,
         .policy = genl_test_policy,
