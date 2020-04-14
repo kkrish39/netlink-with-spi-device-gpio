@@ -33,6 +33,9 @@ static struct spi_device_id spi_deviceId_table[]={
     {"MAX7219", 0}
 };
 
+int configureDotMatrix(void);
+
+
 static void send_message_to_user_processes(unsigned int group){
     void *header;
     int res, flags = GFP_ATOMIC;
@@ -44,7 +47,7 @@ static void send_message_to_user_processes(unsigned int group){
         return;
     }
 
-    header = genlmsg_put(sk_buf, 0, 0, &genl_netlink_family, flags, CONFIGURE_DEVICE);
+    header = genlmsg_put(sk_buf, 0, 0, &genl_netlink_family, flags, CONFIGURE_HCSR04);
     if (!header) {
         DALERT("Error in creating the sk_buf header \n");
         goto nlmsg_fail;
@@ -68,7 +71,7 @@ nlmsg_fail:
     return;
 }
 
-static int configure_device (struct sk_buff* sk_buf, struct genl_info* info){
+static int configure_hcsr04_device (struct sk_buff* sk_buf, struct genl_info* info){
     int echo_pin, trigger_pin, sampling_period, num_samples;
     DALERT("About to configure the devices \n");
     if(!info->attrs[HCSR04_TRIGGER_PIN] || !info->attrs[HCSR04_ECHO_PIN] || !info->attrs[HCSR04_SAMPLING_PERIOD] || !info->attrs[HCSRO4_NUMBER_SAMPLES]){
@@ -81,11 +84,16 @@ static int configure_device (struct sk_buff* sk_buf, struct genl_info* info){
     sampling_period = nla_get_u32(info->attrs[HCSR04_SAMPLING_PERIOD]);
     num_samples = nla_get_u32(info->attrs[HCSRO4_NUMBER_SAMPLES]);
 
-    DALERT("%d  %d  %d  %d\n", echo_pin, trigger_pin, sampling_period, num_samples);
     send_message_to_user_processes(GROUP0);
     return 0;
 }
 
+static int configure_max7219_device (struct sk_buff* sk_buf, struct genl_info* info){
+    printk("About to configure max7219 \n");
+
+    configureDotMatrix();
+    return 0;
+}
 static int start_distance_measurement (struct sk_buff* sk_buf, struct genl_info* info){
 
     return 0;
@@ -97,9 +105,15 @@ static int send_pattern_to_matrix_led (struct sk_buff* sk_buf, struct genl_info*
 }
 static const struct genl_ops genl_netlink_ops[] = {
     {
-        .cmd = CONFIGURE_DEVICE,
+        .cmd = CONFIGURE_HCSR04,
         .policy = genl_test_policy,
-        .doit = configure_device,
+        .doit = configure_hcsr04_device,
+        .dumpit = NULL,
+    },
+    {
+        .cmd = CONFIGURE_MAX7219,
+        .policy = genl_test_policy,
+        .doit = configure_max7219_device,
         .dumpit = NULL,
     },
     {
@@ -151,6 +165,7 @@ int configureDotMatrix(void){
     gpio_set_value_cansleep(46, 1);
     gpio_direction_input(31);
 
+    DALERT("Configuration Successful \n");
     return 0;
 }
 

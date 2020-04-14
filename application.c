@@ -99,33 +99,41 @@ int main() {
         return -1;
     }
 
-    if(!genlmsg_put(msg, NL_AUTO_PID, NL_AUTO_SEQ, family_num, 0, NLM_F_REQUEST, CONFIGURE_DEVICE, 0)){
+    if(!genlmsg_put(msg, NL_AUTO_PID, NL_AUTO_SEQ, family_num, 0, NLM_F_REQUEST, CONFIGURE_HCSR04, 0)){
         printf("Failed to put netlink header. Exiting... \n");
         return -1;
     }
 
+     /* Prepare the callback functions to receive data from the kernel*/
+	cb = nl_cb_alloc(NL_CB_DEFAULT);
+	nl_cb_set(cb, NL_CB_SEQ_CHECK, NL_CB_CUSTOM, skip_seq_check, NULL);
+    nl_cb_set(cb, NL_CB_MSG_IN, NL_CB_CUSTOM, message_entry, NULL);
+	nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, callback_handler, NULL);
+
+    /*Construct the attributes to configure HCSR04 device */
     nla_put_u32(msg, HCSR04_ECHO_PIN, USER_HCSR04_ECHO_PIN);
     nla_put_u32(msg, HCSR04_TRIGGER_PIN, USER_HCSR04_TRIGGER_PIN);
     nla_put_u32(msg, HCSR04_SAMPLING_PERIOD,USER_SAMPLING_PERIOD);
     nla_put_u32(msg, HCSRO4_NUMBER_SAMPLES, USER_NUM_SAMPLES);
 
+    /*Send Request to configure the HCSR04 device*/
     nl_send_auto(netlink_socket, msg);
-
-    /* prep the cb */
-	cb = nl_cb_alloc(NL_CB_DEFAULT);
-	nl_cb_set(cb, NL_CB_SEQ_CHECK, NL_CB_CUSTOM, skip_seq_check, NULL);
-    nl_cb_set(cb, NL_CB_MSG_IN, NL_CB_CUSTOM, message_entry, NULL);
-	nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, callback_handler, NULL);
 	
+    /*Check for any configuration errors */
     if(nl_recvmsgs(netlink_socket, cb)){
         goto failure;
     }
 
+    nlmsg_free(msg);
+    msg = nlmsg_alloc();
+
+    if(!genlmsg_put(msg, NL_AUTO_PID, NL_AUTO_SEQ, family_num, 0, NLM_F_REQUEST, CONFIGURE_MAX7219, 0)){
+        printf("Failed to put netlink header. Exiting... \n");
+        return -1;
+    }
+    
     nl_send_auto(netlink_socket, msg);
-
-    if(nl_recvmsgs(netlink_socket, cb)){
-        goto failure;
-    }
+    
 	nl_cb_put(cb);
 
 failure:
