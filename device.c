@@ -10,7 +10,7 @@ static struct spi_board_info board_info = {
    .max_speed_hz= 10000000, //10MHz
    .bus_num = 1,
    .chip_select = 1,
-   .mode = 0
+   .mode = SPI_MODE_0
 };
 
 

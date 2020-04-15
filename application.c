@@ -19,6 +19,10 @@
 #define USER_SAMPLING_PERIOD 80
 #define USER_NUM_SAMPLES 8
 
+#define SPI_SCK_PIN 13
+#define SPI_MOSI_PIN 11
+#define SPI_DIN_PIN 10
+
 static int skip_seq_check(struct nl_msg *msg, void *arg)
 {
 	return NL_OK;
@@ -131,7 +135,11 @@ int main() {
         printf("Failed to put netlink header. Exiting... \n");
         return -1;
     }
-    
+
+    nla_put_u32(msg, MAX7219_SCK_PIN, SPI_SCK_PIN);
+    nla_put_u32(msg, MAX7219_DIN_PIN, SPI_DIN_PIN);
+    nla_put_u32(msg, MAX7219_MOSI_PIN, SPI_MOSI_PIN);
+
     nl_send_auto(netlink_socket, msg);
     
 	nl_cb_put(cb);

@@ -1,44 +1,41 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/netlink.h>
-#include <linux/timer.h>
-#include <linux/export.h>
-#include <net/genetlink.h>
-#include <linux/delay.h>
-#include <linux/gpio.h>
-#include <linux/spi/spi.h>
-#include <linux/skbuff.h>
+#include <linux/fs.h>
+#include <linux/cdev.h>
+#include <linux/types.h>
+#include <linux/slab.h>
+#include <asm/uaccess.h>
+#include <linux/string.h>
+#include <linux/device.h>
+#include <linux/jiffies.h>
+#include <linux/init.h>
+#include <linux/moduleparam.h>
+#include <linux/miscdevice.h>
 #include <linux/gpio.h>
 #include <linux/interrupt.h>
+#include <linux/delay.h>
 #include <linux/math64.h>
 #include <linux/spinlock.h>
 #include <linux/kthread.h>
 #include <linux/workqueue.h>
-
-#include "genl_ex.h"
 #include "hcsr04_structures.h"
+#include "fifo.h"
 
 #define ALERT
 
 #if defined(ALERT)
-    #define DALERT(fmt, args...) printk(KERN_ALERT "INFO:"fmt, ##args)
+    #define DALERT(fmt, args...) printk(KERN_ALERT "ALERT:"fmt, ##args)
 #else
     #define DALERT(fmt, args...) 
 #endif
 
-#if defined(DEBUG)
+#if defined(INFO)
     #define DPRINTK(fmt, args...) printk(""fmt, ##args)
 #else
     #define DPRINTK(fmt, args...) 
 #endif
 
-#define HCSR_DEVICE_NAME "HCSR04"
-#define LED_DEVICE_NAME "MAX7219"
-static struct genl_family genl_netlink_family;
-
-static struct spi_device_id spi_deviceId_table[]={
-    {"MAX7219", 0}
-};
+#define DEVICE_NAME "HCSR_" //
 
 
 struct work_queue {
@@ -46,7 +43,28 @@ struct work_queue {
 	struct hcsr04_dev *parameter;
 } work_queue;
 
-struct hcsr04_dev *hcsr04_devp;
+/* per device structure */
+struct hcsr04_dev {
+	char name[20]; /* Name of the device */
+    struct miscdevice misc_device; /* Miscellaneous character driver*/
+    pins echo_pin; /*pin structure to keep track of related gpio pins for echo pin*/
+    pins trigger_pin; /*pin structure to keep track of related gpio pins for echo pin*/
+    unsigned long long time_stamp; /*time when the distance is recorded */
+    int distance;/*The distance measure in centimeter*/
+    circular_buf *list; /*Kernel fifo buffer*/
+    int num_samples_per_measurement;/*Number of samples per  measurement */
+    int sampling_period;/*Sampling period*/
+    unsigned long long trig_time; /*Time when the Trigger pin is triggered*/
+    unsigned long long echo_time; /*Time when the echo pin receives an echo*/
+    int isWorkInitialized; /*Flag to keep track whether workQueue is initialized*/
+    int irq_number; /*IRQ number that is being generated for the given echo pin*/
+    struct work_queue *test_wq; /*Workqueue specific for each device */
+    struct mutex lock, sampleRunning; /*per-device locks to enforce synchronization*/
+}*hcsr04_devp[MAX_DEVICE_LIMIT];
+
+/*Number of gpio devices requested by the user*/
+static int n_gpio = 0;
+
 /*static configuration of I/O to gpio pin MUX */
 /*Considering only digital I/O pins*/
 static int lookupTable[4][20]= {
@@ -62,9 +80,33 @@ static int validEchoPins[14] = {0,0,1,1,1,1,1,0,0,1,0,1,0,1};
 /*Valid Trigger pins with L/H/R/F Interrupt modes*/
 static int validTriggerPins[14] = {1,1,1,1,1,1,1,0,0,1,1,1,1,1};
 
-struct spi_device *found_device;
-int configureDotMatrix(void);
+/*Get Number of devices from the user*/
+module_param(n_gpio, uint, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(n_gpio, "Number of GPIO");
 
+
+/*
+* Function to open the given device file.
+*/
+int hcsr04_driver_open(struct inode *inode, struct file *file){
+    /*The file pointer will already be pointing to the misc device when it's rgistered */
+    struct hcsr04_dev *hcsr04_devp;
+    hcsr04_devp = container_of(file->private_data, struct hcsr04_dev,misc_device);
+
+    DALERT("%s is opening \n", hcsr04_devp->name);
+    return 0;
+}
+
+/*
+* Function to release the given device file once all the operations are done.
+*/
+int hcsr04_driver_release(struct inode *inode, struct file *file){
+    struct hcsr04_dev *hcsr04_devp;
+    hcsr04_devp = container_of(file->private_data, struct hcsr04_dev,misc_device);
+    
+    DALERT("%s is closing \n", hcsr04_devp->name);
+    return 0;
+}
 
 /*Function to keep the most recently measured data*/
 void writeToCircularBuffer(long distance, long long timestamp, struct hcsr04_dev *hcsr04_devp){
@@ -179,9 +221,71 @@ static int spawnThread(struct hcsr04_dev *hcsr04_devp){
     return 0;
 }
 
+/* Function to handle write function for the device */
+ssize_t hcsr04_driver_write(struct file *file, const char *buf, size_t count, loff_t *ppos){
+    int *input_val, lock;
+    int ret;
+    struct hcsr04_dev *hcsr04_devp;
+    hcsr04_devp = container_of(file->private_data, struct hcsr04_dev,misc_device);
+    
+    /*Check if there is any ongoing measurement*/
+    lock = mutex_trylock(&hcsr04_devp->sampleRunning);
+    
+    /*Enforcing non-blocking write. Exiting if there is an ongoing measurement*/
+    if(!lock){
+        DALERT("****There is an Ongoing Measurement****\n");
+        return -EINVAL;
+    }
+    copy_from_user(&input_val, (int *)buf, sizeof(int));
+
+    /*If the input is 0, clear the buffer and start the measurement.*/
+    if(input_val == 0){
+        clearBuffer(hcsr04_devp);
+    }
+    /*Start the Measurement*/
+    DALERT("Triggering measurment from Write Function \n");
+    ret =  spawnThread(hcsr04_devp);
+    return ret;
+}
+
 /*Function to pull out the read value from the buffer*/
 void removeReadMeasurement(struct hcsr04_dev *hcsr04_devp){
     hcsr04_devp->list = deleteHead(hcsr04_devp->list);
+}
+
+/* Function to handle read function for the device */
+ssize_t hcsr04_driver_read(struct file *file, char *buf, size_t count, loff_t *ppos){
+    struct hcsr04_dev *hcsr04_devp;
+    struct circular_buffer data;
+    int lock;
+    hcsr04_devp = container_of(file->private_data, struct hcsr04_dev,misc_device);
+
+    /*Check if the lock is free*/
+    lock = mutex_trylock(&hcsr04_devp->sampleRunning);
+    /*If there is a lock already, wait till we acquire the lock and return the data*/
+    /*Blocking Read*/
+    if(!lock){
+        DPRINTK("Waiting for the Ongoing Measurement \n");
+        mutex_lock(&hcsr04_devp->sampleRunning);
+    }
+    
+    /*If there is no lock and no measurements, trigger a measurement*/
+    if(hcsr04_devp->list == NULL){
+        DALERT("Triggering measurment from Read Function \n");
+        spawnThread(hcsr04_devp);
+        mutex_lock(&hcsr04_devp->sampleRunning);
+    }
+
+    DALERT("About to send distace:%ld Timestamp:%lld \n", hcsr04_devp->list->distance, hcsr04_devp->list->timestamp);
+    data.distance = hcsr04_devp->list->distance;
+    data.timestamp = hcsr04_devp->list->timestamp;
+    copy_to_user((struct circular_buffer *)buf, &data, sizeof(struct circular_buffer));
+    
+    /*Removing the currently read value from the buffer*/
+    hcsr04_devp->list = deleteHead(hcsr04_devp->list);
+    mutex_unlock(&hcsr04_devp->sampleRunning);
+    
+    return sizeof(circular_buffer);
 }
 
 /*Function to change th sampling period and number of sampels*/
@@ -484,490 +588,141 @@ int configure_IO_pins(config_input *input,struct hcsr04_dev *fileData){
     return -EINVAL;
 }
 
+/*Function to perform IOCTL operation requested by the user*/
+static long hcsr04_driver_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
+    struct hcsr04_dev *hcsr04_devp;
+    void * input;
 
-static void send_message_to_user_processes(unsigned int group){
-    void *header;
-    int res, flags = GFP_ATOMIC;
-    char msg[MAX_BUF_LENGTH];
-    struct sk_buff* sk_buf = genlmsg_new(NLMSG_DEFAULT_SIZE, flags);
+    hcsr04_devp = container_of(file->private_data, struct hcsr04_dev, misc_device);
 
-    if (!sk_buf) {
-        DALERT("Failed to create a new generic message. \n");
-        return;
-    }
-
-    header = genlmsg_put(sk_buf, 0, 0, &genl_netlink_family, flags, CONFIGURE_HCSR04);
-    if (!header) {
-        DALERT("Error in creating the sk_buf header \n");
-        goto nlmsg_fail;
-    }
-
-    snprintf(msg, MAX_BUF_LENGTH, "Hello group %s\n", genl_test_mcgrp_names[group]);
-    nla_put_flag(sk_buf, RET_VAL_SUCCESS);
-    res = nla_put_string(sk_buf, CALLBACK_IDENTIFIER, msg);
-    if (res) {
-        printk(KERN_ERR "%d: err %d ", __LINE__, res);
-        goto nlmsg_fail;
-    }
-
-    genlmsg_end(sk_buf, header);
-    genlmsg_multicast(&genl_netlink_family, sk_buf, 0, group, flags);
-    return;
-
-nlmsg_fail:
-    genlmsg_cancel(sk_buf, header);
-    nlmsg_free(sk_buf);
-    return;
-}
-
-static int configure_hcsr04_device (struct sk_buff* sk_buf, struct genl_info* info){
-    config_input input_pins;
-    setparam_input input_params;
-    DALERT("About to configure the devices \n");
-    if(!info->attrs[HCSR04_TRIGGER_PIN] || !info->attrs[HCSR04_ECHO_PIN] || !info->attrs[HCSR04_SAMPLING_PERIOD] || !info->attrs[HCSRO4_NUMBER_SAMPLES]){
-        DALERT("Empty data is sent from the user. Exiting... \n");
-        return -EINVAL;
-    }
-
-    input_pins.echo_pin = nla_get_u32(info->attrs[HCSR04_ECHO_PIN]);
-    input_pins.trigger_pin =  nla_get_u32(info->attrs[HCSR04_TRIGGER_PIN]);
-    input_params.sampling_period = nla_get_u32(info->attrs[HCSR04_SAMPLING_PERIOD]);
-    input_params.num_samples = nla_get_u32(info->attrs[HCSRO4_NUMBER_SAMPLES]);
-
-    DALERT("%d  %d  %d  %d", input_pins.echo_pin, input_pins.trigger_pin, input_params.sampling_period, input_params.num_samples);
-    // if(configure_IO_pins(&input_pins, hcsr04_devp) < 0){
-    //     DALERT("Configuring HCSR04 I/O pins failed");
-    //     return -EINVAL;
-    // }
-    // if(configure_measurement_parameters(&input_params, hcsr04_devp) < 0){
-    //     DALERT("Configuring HCSR04 parameters failed");
-    //     return -EINVAL;
-    // }
-    send_message_to_user_processes(GROUP0);
-    return 0;
-}
-
-static void transfer_complete(void *context){
-    DALERT("The transfer is completed successfully");
-}
-static int setup_device(struct spi_device *spi){
-    uint16_t trans_arr = 0x0F01;
-    struct spi_message msg;
-	    		
-	
-
-    //for message exchange
-    struct spi_transfer spi_trans = {
-        .tx_buf = &trans_arr,
-        .rx_buf = 0,
-        .len = 2,
-        .bits_per_word = 16,
-        .speed_hz = 10000000,
-        .delay_usecs = 1,
-        .cs_change = 1,
+    switch(cmd){
+        /*Setting up the I/O pins*/
+        case CONFIG_PINS:
+            input = (config_input *)arg;
+            if(configure_IO_pins(input, hcsr04_devp) < 0){
+                return -EINVAL;
+            }
+            break;
+        /*Setting up the measurement parameters*/
+        case SET_PARAMETERS:
+            input = (setparam_input *)arg;
+            if(configure_measurement_parameters(input, hcsr04_devp)){
+                return -EINVAL;
+            }
+            break;
+        default:
+            break;
     };
 
-    printk("Lighting up LEDS - display Test mode!!");
-	// trans_arr[0] = 0x0F;
-	// trans_arr[1] = 0x01;
-    spi_message_init(&msg);
-    msg.complete = &transfer_complete;
-	spi_message_add_tail((void *)&spi_trans, &msg);
-	gpio_set_value(15,0);
-	spi_sync(spi, &msg);
-	gpio_set_value(15,1);	
-	return 0;
-
-
-    // struct spi_message *sp_msg;
-    // struct spi_transfer sp_tf1;
-    // struct spi_transfer *sp_tf2;
-    // struct spi_transfer *sp_tf3;
-    // struct spi_transfer *sp_tf4;
-    // struct spi_transfer *sp_tf5;
-    // struct spi_transfer *sp_tf6;
-    // int ret = 0;
-    // u16 d1=0x0F01, d2, d3, d4, d5;
-
-    // static u16 pat[8] = {0x0110,0x0209, 0x030F, 0x0408, 0x0508, 0x06EC, 0x07FB, 0x0819};
-    // u8 bits = 16;
-    // u32 speed = 10000000;
-    // u16 delay = 0;
-    // // sp_tf1 = kmalloc(sizeof(struct spi_transfer), GFP_KERNEL);
-    // sp_tf2 = kmalloc(sizeof(struct spi_transfer), GFP_KERNEL);
-    // sp_tf3 = kmalloc(sizeof(struct spi_transfer), GFP_KERNEL);
-    // sp_tf4 = kmalloc(sizeof(struct spi_transfer), GFP_KERNEL);
-    // sp_tf5 = kmalloc(sizeof(struct spi_transfer), GFP_KERNEL);
-    // sp_tf6 = kmalloc(sizeof(struct spi_transfer), GFP_KERNEL);
-
-    // // d1={0x0F,0x01};
-    // // d3=0x0B07;
-    // // d4=0x0C01;
-    // // d5=0x0F01;
-
-    // // memset(sp_tf1, 0, sizeof(struct spi_transfer));
-    // memset(sp_tf2, 0, sizeof(struct spi_transfer));
-    // memset(sp_tf3, 0, sizeof(struct spi_transfer));
-    // memset(sp_tf4, 0, sizeof(struct spi_transfer));
-    // memset(sp_tf5, 0, sizeof(struct spi_transfer));
-    // memset(sp_tf6, 0, sizeof(struct spi_transfer));
-
-    // sp_tf1.tx_buf=&d1;
-    // sp_tf1.rx_buf=NULL;
-    // sp_tf1.len=2;
-    // sp_tf1.speed_hz=speed;
-    // sp_tf1.bits_per_word = bits;
-	// sp_tf1.delay_usecs = delay;
-
-    // sp_tf2->tx_buf=&d2;
-    // sp_tf2->rx_buf=NULL;
-    // sp_tf2->len=2;
-    // sp_tf2->speed_hz=speed;
-    // sp_tf2->bits_per_word = bits;
-	// sp_tf2->delay_usecs = delay;
-
-    // sp_tf3->tx_buf=&d3;
-    // sp_tf3->rx_buf=NULL;
-    // sp_tf3->len=2;
-    // sp_tf3->speed_hz=speed;
-    // sp_tf3->bits_per_word = bits;
-	// sp_tf3->delay_usecs = delay;
-
-    // sp_tf4->tx_buf=&d4;
-    // sp_tf4->rx_buf=NULL;
-    // sp_tf4->len=2;
-    // sp_tf4->speed_hz=speed;
-    // sp_tf4->bits_per_word = bits;
-	// sp_tf4->delay_usecs = delay;
-
-    // sp_tf5->tx_buf=&d5;
-    // sp_tf5->rx_buf=NULL;
-    // sp_tf5->len=2;
-    // sp_tf5->speed_hz=speed;
-    // sp_tf5->bits_per_word = bits;
-	// sp_tf5->delay_usecs = delay;
-
-
-    // sp_tf6->tx_buf=&pat;
-    // sp_tf6->rx_buf=NULL;
-    // sp_tf6->len=16;
-    // sp_tf6->speed_hz=speed;
-    // sp_tf6->bits_per_word = bits;
-	// sp_tf6->delay_usecs = delay;
-
-    // sp_msg = kmalloc(sizeof(struct spi_message), GFP_KERNEL);
-    // spi_message_init(sp_msg);
-   
-    // spi_message_add_tail(&sp_tf1, sp_msg);
-    // // spi_message_add_tail(sp_tf2, sp_msg);
-    // // spi_message_add_tail(sp_tf3, sp_msg);
-    // // spi_message_add_tail(sp_tf4, sp_msg);
-    // // spi_message_add_tail(sp_tf5, sp_msg);
-    // // spi_message_add_tail(sp_tf6, sp_msg);
-    // ret = spi_sync(spi, sp_msg);
-
-    // mdelay(100);
-    DALERT("Transfer Complete");
-    return 0;
-}
-static int configure_max7219_device (struct sk_buff* sk_buf, struct genl_info* info){
-    printk("About to configure max7219 \n");
-    return 0;
-}
-static int start_distance_measurement (struct sk_buff* sk_buf, struct genl_info* info){
-    spawnThread(hcsr04_devp);
     return 0;
 }
 
-static int send_pattern_to_matrix_led (struct sk_buff* sk_buf, struct genl_info* info){
-
-    return 0;
-}
-static const struct genl_ops genl_netlink_ops[] = {
-    {
-        .cmd = CONFIGURE_HCSR04,
-        .policy = genl_test_policy,
-        .doit = configure_hcsr04_device,
-        .dumpit = NULL,
-    },
-    {
-        .cmd = CONFIGURE_MAX7219,
-        .policy = genl_test_policy,
-        .doit = configure_max7219_device,
-        .dumpit = NULL,
-    },
-    {
-        .cmd = INITIATE_MEASUREMENT,
-        .policy = genl_test_policy,
-        .doit = start_distance_measurement,
-        .dumpit = NULL,
-    },
-    {
-        .cmd = DISPLAY_PATTERN,
-        .policy = genl_test_policy,
-        .doit = send_pattern_to_matrix_led,
-        .dumpit = NULL,
-    },
+/*List of file operations to be implemented by the misc_devices*/
+static struct file_operations hcsr04_fops = {
+    .owner          = THIS_MODULE,
+    .open           = hcsr04_driver_open,
+    .release        = hcsr04_driver_release,
+    .write          = hcsr04_driver_write,
+    .read           = hcsr04_driver_read,
+    .unlocked_ioctl = hcsr04_driver_ioctl
 };
 
-int configureDotMatrix(void){
+/*Module Entry function*/
+int __init hcsr04_driver_init(void){
+    int ret;
+    int i;
 
-printk(KERN_INFO" initializing the gpio pins for the spi LED matrix\n");
-	// //IO11 is conencted to DIn fo dot matrix LED
-	// gpio_export(mosi_ls,true);
-	// gpio_export(mosi_pullup,true);
-	// gpio_export(mosi_mux1,true);
-	// gpio_export(mosi_mux2,true);
-	// gpio_export(mosi_gpio,true);
-	// gpio_direction_output(mosi_gpio,1);
-	// gpio_set_value(mosi_gpio,1);
-	// gpio_set_value(mosi_mux2,0);
-	// gpio_direction_output(mosi_ls,1);
-	// gpio_set_value(mosi_ls,0);
-	// gpio_direction_output(mosi_pullup,1);
-	// gpio_set_value(mosi_pullup,0);
-	// gpio_direction_output(mosi_mux1,1);
-	// gpio_set_value(mosi_mux1,1);
+    for(i=0;i<n_gpio;i++){
+        hcsr04_devp[i] = kmalloc(sizeof(struct hcsr04_dev), GFP_KERNEL);
+        if(!hcsr04_devp[i]) {
+            DALERT("Unable to allocate memory \n");
+            return -ENOMEM;
+        }
 
-	// //IO13 is connected to CLK pin of dot matrix LED
-	// gpio_export(sck_ls,true);
-	// gpio_export(sck_pullup,true);
-	// gpio_export(sck_mux1,true);
-	// gpio_export(sck_gpio,true);
-	// gpio_direction_output(sck_gpio,1);
-	// gpio_set_value(sck_gpio,1);
-	// gpio_direction_output(sck_mux1,1);
-	// gpio_set_value(sck_mux1,1);
-	// gpio_direction_output(sck_ls,1);
-	// gpio_set_value(sck_ls,0);
-	// gpio_direction_output(sck_pullup,1);
-	// gpio_set_value(sck_pullup,0);
+        memset(hcsr04_devp[i], 0, sizeof (struct hcsr04_dev));
 
-	// //IO12 is connected to CS pin of dot matrix LED
-	// gpio_export(42,true);
-	// gpio_export(43,true);
-	// gpio_export(15,true);
-	// gpio_direction_output(42,1);
-	// gpio_set_value(42,0);
-	// gpio_direction_output(43,1);
-	// gpio_set_value(43,0);
-	// gpio_direction_output(15,1);
-	// gpio_set_value(15,0);
-    
-    
-    if(gpio_request(24, "gpio24")){
-        DALERT("Configuration failed \n");
+        sprintf(hcsr04_devp[i]->name, "%s%d",DEVICE_NAME,i+1);
+
+        /*Allocate Miscellaneous device structure*/
+        // (minor_number, device_name, file_operations) 
+        hcsr04_devp[i]->misc_device.minor = MISC_DYNAMIC_MINOR; //Dynamically allocated
+        hcsr04_devp[i]->misc_device.name = hcsr04_devp[i]->name;
+        hcsr04_devp[i]->misc_device.fops = &hcsr04_fops;
+        
+        /*Initializing the variables */
+        hcsr04_devp[i]->irq_number = 0;
+        hcsr04_devp[i]->isWorkInitialized = 0;
+        
+        /*Initialize work queue*/
+        hcsr04_devp[i]->test_wq = kmalloc(sizeof(struct work_queue *), GFP_KERNEL);
+
+        /*Initializing mutexes*/
+        mutex_init(&hcsr04_devp[i]->lock);
+        mutex_init(&hcsr04_devp[i]->sampleRunning);
+        /*Reigster the miscellaneous device */
+        ret = misc_register(&hcsr04_devp[i]->misc_device);
+
+
+        if(ret){
+            DALERT(KERN_DEBUG "Can't register miscellaneous device\n");
+            return ret;
+        }
     }
-    if(gpio_request(44, "gpio44")){
-        DALERT("Configuration failed \n");
-    }
-    if(gpio_request(72, "gpio72")){
-        DALERT("Configuration failed \n");
-    }
-    if(gpio_request(25, "gpio25")){
-        DALERT("Configuration failed \n");
-    }
-    // if(gpio_request(5, "gpio5")){
-    //     DALERT("Configuration failed \n");
-    // }
-
-
-
-    gpio_direction_output(44,1);
-    // gpio_direction_output(5,0);
-    gpio_direction_output(24,0);
-    gpio_direction_output(25,0);
-    // gpio_set_value_cansleep(5, 1);
-    // gpio_set_value_cansleep(44, 1);
-    gpio_set_value_cansleep(72, 0);
-    // gpio_set_value_cansleep(24, 0);
-    // gpio_set_value_cansleep(25, 0);
-
-
-    if(gpio_request(46, "gpio46")){
-        DALERT("Configuration failed \n");
-    }
-    if(gpio_request(30, "gpio30")){
-        DALERT("Configuration failed \n");
-    }
-    if(gpio_request(31, "gpio31")){
-        DALERT("Configuration failed \n");
-    }
-    // if(gpio_request(7, "gpio7")){
-    //     DALERT("Configuration failed \n");
-    // }
-
-    // gpio_direction_output(7,1);
-	// gpio_set_value_cansleep(7,1);
-	gpio_direction_output(46,1);
-	// gpio_set_value_cansleep(46,1);
-	gpio_direction_output(30,0);
-	// gpio_set_value_cansleep(30,0);
-	gpio_direction_output(31,0);
-	// gpio_set_value_cansleep(31,0);
-
-
-    if(gpio_request(42, "gpio42")){
-        DALERT("Configuration failed \n");
-    }
-    if(gpio_request(43, "gpio43")){
-        DALERT("Configuration failed \n");
-    }
-    if(gpio_request(15, "gpio15")){
-        DALERT("Configuration failed \n");
-    }
-
-    gpio_direction_output(42,0);
-	// gpio_set_value_cansleep(42,0);
-	gpio_direction_output(43,0);
-	// gpio_set_value_cansleep(43,0);
-	gpio_direction_output(15,0);
-	// gpio_set_value_cansleep(15,0);
-    // gpio_direction_output(26,0);
-    // gpio_set_value_cansleep(74, 1);
-    // gpio_direction_input(27);
-
-    // if(gpio_request(30, "gpio26")){
-    //     DALERT("Configuration failed \n");
-    // }
-    // if(gpio_request(46, "gpio74")){
-    //     DALERT("Configuration failed \n");
-    // }
-    // if(gpio_request(31, "gpio27")){
-    //     DALERT("Configuration failed \n");
-    // }
-
-    // gpio_direction_output(30,0);
-    // gpio_set_value_cansleep(46, 1);
-    // gpio_direction_input(31);
-
-    DALERT("Configuration Successful pins \n");
-
+    DALERT("hcsr04 drive initialized. \n");   
     return 0;
 }
 
-void deConfigureDotMatrix(void){
-    gpio_free(26);
-    gpio_free(74);
-    gpio_free(27);
-    gpio_free(24);
-    gpio_free(44);
-    gpio_free(72);
-    gpio_free(25);
-    gpio_free(46);
-    gpio_free(30);
-    gpio_free(31);
-}
-static const struct genl_multicast_group genl_netlink_mcgrps[] = {
-    [GROUP0] = { .name = MULTICAST_GROUP0, },
-    [GROUP1] = { .name = MULTICAST_GROUP1, },
-    [GROUP2] = { .name = MULTICAST_GROUP2, },
-};
+/*Module exit function*/
+void __exit hcsr04_driver_exit(void){
+    int i;
 
-static struct genl_family genl_netlink_family = {
-    .name = NETLINK_FAMILY_NAME,
-    .version = 1,
-    .maxattr = GENL_TEST_ATTR_MAX,
-    .netnsok = false,
-    .module = THIS_MODULE,
-    .ops = genl_netlink_ops,
-    .n_ops = ARRAY_SIZE(genl_netlink_ops),
-    .mcgrps = genl_netlink_mcgrps,
-    .n_mcgrps = ARRAY_SIZE(genl_netlink_mcgrps),
-};
+    /*Free the memory for each device created */
+    for(i=0;i<n_gpio;i++){
+        DALERT("********CLEARING %s********", hcsr04_devp[i]->name);
+        if(hcsr04_devp[i]->isWorkInitialized)
+            flush_work(&hcsr04_devp[i]->test_wq->work);
+        DALERT("Freeing IRQ \n");
+        if(hcsr04_devp[i]->irq_number)
+            free_irq(hcsr04_devp[i]->irq_number, hcsr04_devp[i]);
+        
+        DALERT("Freeing Echo pin I/O related gpio pins \n");
+        if(hcsr04_devp[i]->echo_pin.gpio_pin >= 0){
+            gpio_free(hcsr04_devp[i]->echo_pin.gpio_pin);
+        }
+        if(hcsr04_devp[i]->echo_pin.mux1 >= 0){
+            gpio_free(hcsr04_devp[i]->echo_pin.mux1);
+        }
+        if(hcsr04_devp[i]->echo_pin.pull >= 0){
+            gpio_free(hcsr04_devp[i]->echo_pin.pull);
+        }
+        if(hcsr04_devp[i]->echo_pin.shift_pin >= 0){
+            gpio_free(hcsr04_devp[i]->echo_pin.shift_pin);
+        }
 
+        DALERT("Freeing Trigger pin I/O related gpio pins \n");
+        if(hcsr04_devp[i]->trigger_pin.gpio_pin >= 0){
+            gpio_free(hcsr04_devp[i]->trigger_pin.gpio_pin);
+        }
+        if(hcsr04_devp[i]->trigger_pin.mux1 >= 0){
+            gpio_free(hcsr04_devp[i]->trigger_pin.mux1);
+        }
+        if(hcsr04_devp[i]->trigger_pin.pull >= 0){
+            gpio_free(hcsr04_devp[i]->trigger_pin.pull);
+        }
+        if(hcsr04_devp[i]->trigger_pin.shift_pin >= 0){
+            gpio_free(hcsr04_devp[i]->trigger_pin.shift_pin);
+        }
+       
+        /*unregister the miscellaneous devices */
+        misc_deregister(&hcsr04_devp[i]->misc_device);
 
-
-/************************************************************************************************************************************************************/
-
-static int initializeDevice(void){
-    // configureDotMatrix();
-    return 0;
-}
-
-static int removeDevice(void){
-    deConfigureDotMatrix();
-    return 0;
-}
-
-static int spi_driver_probe(struct spi_device *spi){
-    DALERT("Found a matching device. About to Initialize \n");
-    found_device = spi;
-    configureDotMatrix();
-
-    if(setup_device(found_device)){
-        DALERT("Failed to initialize the found device\n");
-        return -EINVAL;
+        /*Free the allocated memory for each device */
+        kfree(hcsr04_devp[i]);
     }
-    
-    initializeDevice();
-    DALERT("SPI Driver initialized successfully.\n");
-    return 0;
+    DALERT("hcsr04 driver removed \n");
 }
 
-static int spi_driver_remove(struct spi_device *spi){
-    DALERT("Removing the device. \n");
+module_init(hcsr04_driver_init);
+module_exit(hcsr04_driver_exit);
 
-    if(removeDevice()){ 
-        DALERT("Failed to remove the device\n");
-        return -EINVAL; 
-    }
-    DALERT("SPI Driver removed successfully.\n");
-    return 0;
-}
-
-
-/*
-*
-*/
-static struct spi_driver spi_driver = {
-    .id_table=spi_deviceId_table,
-    .probe=spi_driver_probe,
-    .remove=spi_driver_remove,
-    .driver={
-        .name = LED_DEVICE_NAME,
-        .owner = THIS_MODULE,
-    }
-};
-
-/************************************************************************************************************************************************************/
-
-static int __init spi_netlink_init(void){
-    if(genl_register_family(&genl_netlink_family)){
-        DALERT("Netlink family registration failed. \n");
-        return -EINVAL;
-    }
-    DALERT("Generic Netlink family registered successfully. \n");
-    
-    hcsr04_devp = kmalloc(sizeof(struct hcsr04_dev), GFP_KERNEL);
-    
-    if(!hcsr04_devp) {
-        DALERT("Unable to allocate memory \n");
-        return -ENOMEM;
-    }
-
-    memset(hcsr04_devp, 0, sizeof (struct hcsr04_dev));
-
-    sprintf(hcsr04_devp->name, "%s",HCSR_DEVICE_NAME);
-
-    if(spi_register_driver(&spi_driver)){
-        DALERT("Failed to register spi driver. \n");
-        return -EINVAL;
-    }
-    DALERT("SPI Driver registered successfully. \n");
-    return 0;
-}
-
-static void spi_netlink_exit(void){
-    DALERT("About to unregister the driver and the genl family \n");
-    genl_unregister_family(&genl_netlink_family);
-
-    spi_unregister_driver(&spi_driver);
-    DALERT("Driver and Generic unregistration successful.\n");
-}
-
-module_init(spi_netlink_init);
-module_exit(spi_netlink_exit);
-
-MODULE_AUTHOR("Keerthivasan");
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v2");
