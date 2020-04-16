@@ -46,6 +46,7 @@ enum genl_test_attrs {
 	MAX7219_DIN_PIN,
 	MAX7219_MOSI_PIN,
 	CALLBACK_IDENTIFIER,
+	DISTANCE_MEASURE,
 	RET_VAL_SUCCESS,
 	RET_VAL_FAILURE,
 	OPTIONAL_ERROR_MESSAGE,
@@ -75,6 +76,9 @@ static struct nla_policy genl_test_policy[GENL_TEST_ATTR_MAX+1] = {
 	},
 	[RET_VAL_SUCCESS] = {
 		.type = NLA_FLAG
+	},
+	[DISTANCE_MEASURE] = {
+		.type = NLA_U32
 	},
 	[OPTIONAL_ERROR_MESSAGE] ={
 		.type = NLA_STRING,

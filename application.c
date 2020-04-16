@@ -6,6 +6,8 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <pthread.h>
+#include <sched.h>
 #include <netlink/msg.h>
 #include <netlink/attr.h>
 #include <netlink/genl/genl.h>
@@ -16,12 +18,16 @@
 
 #define USER_HCSR04_ECHO_PIN 5
 #define USER_HCSR04_TRIGGER_PIN 1
-#define USER_SAMPLING_PERIOD 80
-#define USER_NUM_SAMPLES 8
+#define USER_SAMPLING_PERIOD 70
+#define USER_NUM_SAMPLES 4
 
 #define SPI_SCK_PIN 13
 #define SPI_MOSI_PIN 11
 #define SPI_DIN_PIN 10
+
+static struct nl_sock *netlink_socket;
+static struct nl_msg *msg;
+static struct nl_cb *cb = NULL;
 
 static int skip_seq_check(struct nl_msg *msg, void *arg)
 {
@@ -39,7 +45,7 @@ static int callback_handler(struct nl_msg *msg, void* arg)
 	genlmsg_parse(nlmsg_hdr(msg), 0, attr, GENL_TEST_ATTR_MAX, genl_test_policy);
 
     if(!nla_get_flag(attr[RET_VAL_SUCCESS])){
-        printf("***************************Encountered an error***************************\n");
+        printf("***************************Encountered an error*************************** \n");
         if(attr[OPTIONAL_ERROR_MESSAGE]){
             printf("The Following error occured: %s \n", nla_get_string(attr[OPTIONAL_ERROR_MESSAGE]));
         }
@@ -47,21 +53,29 @@ static int callback_handler(struct nl_msg *msg, void* arg)
     }
 
 	if (!attr[CALLBACK_IDENTIFIER]) {
-		fprintf(stdout, "\t\t\t\tKernel sent empty message!!\n");
+		fprintf(stdout, "\t\t\t\tKernel sent empty message!! \n");
 		return NL_OK;
 	}
 
+    if(attr[DISTANCE_MEASURE]){
+        printf("Received the distance measure: %d \n", nla_get_u32(attr[DISTANCE_MEASURE]));
+    }
     printf("\t\t\t\tEntering the data \n");
 	return NL_OK;
 }
 
-int main() {
-    struct nl_sock *netlink_socket;
-    struct nl_msg *msg;
-    struct nl_cb *cb = NULL;
-    int group_id;
+void *receiveMeasurements(){
+    while(1){
+        if(nl_recvmsgs(netlink_socket, cb)){
+            printf("Received a message from the kernel. \n");
+        }
+    }
+    pthread_exit(NULL);
+}
 
-    int family_num;
+int main() {
+    int group_id, family_num, return_value;
+    pthread_t thread_dev1;
     /*Initializing the netlink socket*/
     netlink_socket = nl_socket_alloc();
 
@@ -128,6 +142,7 @@ int main() {
         goto failure;
     }
 
+    printf("About to configure matrix \n");
     nlmsg_free(msg);
     msg = nlmsg_alloc();
 
@@ -142,6 +157,33 @@ int main() {
 
     nl_send_auto(netlink_socket, msg);
     
+     /*Check for any configuration errors */
+    if(nl_recvmsgs(netlink_socket, cb)){
+        goto failure;
+    }
+
+    printf("About to send measurement \n");
+    nlmsg_free(msg);
+    msg = nlmsg_alloc();
+    if(!genlmsg_put(msg, NL_AUTO_PID, NL_AUTO_SEQ, family_num, 0, NLM_F_REQUEST, INITIATE_MEASUREMENT, 0)){
+        printf("Failed to put netlink header. Exiting... \n");
+        return -1;
+    }
+
+    nl_send_auto(netlink_socket, msg);
+
+    return_value = pthread_create(&thread_dev1, NULL, receiveMeasurements, (void *)netlink_socket);
+  /*Check for any configuration errors */
+    // if(nl_recvmsgs(netlink_socket, cb)){
+    //     goto failure;
+    // }
+     if(return_value){
+        printf("Error in creating thread for device 1\n");
+        goto failure;
+    }
+    
+    pthread_join(thread_dev1, NULL);
+
 	nl_cb_put(cb);
 
 failure:
