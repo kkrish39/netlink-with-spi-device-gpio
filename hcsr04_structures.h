@@ -1,5 +1,6 @@
 #include <linux/ioctl.h>
 #include <linux/miscdevice.h>
+#include <linux/spi/spi.h>
 #include "fifo.h"
 
 #define MAX_DEVICE_LIMIT 15
@@ -25,13 +26,29 @@ typedef struct circular_buffer{
 
 /*List of gpio pins that may be associated with the a given I/O pin */
 typedef struct pins_to_configure {
-    int digitalPin;
-    int gpio_pin;   /* GPIO  Pin*/
-    int shift_pin;  /*shift pin*/
-    int pull;       /*pull pin*/
-    int mux1;       /*mux1_pin*/
-    int mux2;       /*mux2_pin*/
+    int digitalPin; /*   Digital pin */
+    int gpio_pin;   /*   GPIO pin    */
+    int shift_pin;  /*   Shift pin   */
+    int pull;       /*   Pull pin    */
+    int mux1;       /*   Mux1 pin    */
+    int mux2;       /*   Mux2 pin    */
 } pins;
+
+/*static configuration of I/O to gpio pin MUX */
+/*Considering only digital I/O pins*/
+static int lookupTable[4][20]= {
+    {11,12,61,14,6,0,1,38,40,4,10,5,15,7},
+    {32,28,-1,16,36,18,20,-1,-1,22,26,24,42,30},
+    {33,29,35,17,37,19,21,39,41,23,27,25,43,31},
+    {-1,45,77,76,-1,66,68,-1,-1,70,74,44,-1,46}
+};
+
+/*Valid Echo pins with R/F/B Interrupt modes*/
+static int validEchoPins[14] = {0,0,1,1,1,1,1,0,0,1,0,1,0,1};
+
+/*Valid Trigger pins with L/H/R/F Interrupt modes*/
+static int validTriggerPins[14] = {1,1,1,1,1,1,1,0,0,1,1,1,1,1};
+
 
 /* per device structure */
 struct hcsr04_dev {
@@ -49,4 +66,6 @@ struct hcsr04_dev {
     int irq_number; /*IRQ number that is being generated for the given echo pin*/
     struct work_queue *test_wq; /*Workqueue specific for each device */
     struct mutex lock, sampleRunning; /*per-device locks to enforce synchronization*/
+    unsigned long long timeToStopMeasurment; /*Keep track the time to halt the distance measurement*/
+    struct spi_device *found_device;
 };

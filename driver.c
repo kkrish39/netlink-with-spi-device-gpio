@@ -6,7 +6,6 @@
 #include <net/genetlink.h>
 #include <linux/delay.h>
 #include <linux/gpio.h>
-#include <linux/spi/spi.h>
 #include <linux/skbuff.h>
 #include <linux/gpio.h>
 #include <linux/interrupt.h>
@@ -47,20 +46,6 @@ struct work_queue {
 } work_queue;
 
 struct hcsr04_dev *hcsr04_devp;
-/*static configuration of I/O to gpio pin MUX */
-/*Considering only digital I/O pins*/
-static int lookupTable[4][20]= {
-    {11,12,61,14,6,0,1,38,40,4,10,5,15,7},
-    {32,28,-1,16,36,18,20,-1,-1,22,26,24,42,30},
-    {33,29,35,17,37,19,21,39,41,23,27,25,43,31},
-    {-1,45,77,76,-1,66,68,-1,-1,70,74,44,-1,46}
-};
-
-/*Valid Echo pins with R/F/B Interrupt modes*/
-static int validEchoPins[14] = {0,0,1,1,1,1,1,0,0,1,0,1,0,1};
-
-/*Valid Trigger pins with L/H/R/F Interrupt modes*/
-static int validTriggerPins[14] = {1,1,1,1,1,1,1,0,0,1,1,1,1,1};
 
 struct spi_device *found_device;
 
@@ -901,7 +886,8 @@ static int start_distance_measurement (struct sk_buff* sk_buf, struct genl_info*
 }
 
 static int send_pattern_to_matrix_led (struct sk_buff* sk_buf, struct genl_info* info){
-
+    DALERT("Sending Pattern to led");
+    sendPattern(found_device);
     return 0;
 }
 
@@ -1044,7 +1030,6 @@ static int initializeDevice(void){
         return -EINVAL;
     }
     
-    sendPattern(found_device);
     return 0;
 }
 

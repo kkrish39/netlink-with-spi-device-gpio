@@ -20,6 +20,7 @@
 #define USER_HCSR04_TRIGGER_PIN 1
 #define USER_SAMPLING_PERIOD 70
 #define USER_NUM_SAMPLES 4
+#define NUM_MINUTES_TO_RUN 2
 
 #define SPI_SCK_PIN 13
 #define SPI_MOSI_PIN 11
@@ -64,6 +65,12 @@ static int callback_handler(struct nl_msg *msg, void* arg)
 	return NL_OK;
 }
 
+void *sendPattern(){
+    while(1){
+        nl_send_auto(netlink_socket, msg);
+    }
+}
+
 void *receiveMeasurements(){
     while(1){
         if(nl_recvmsgs(netlink_socket, cb)){
@@ -75,7 +82,8 @@ void *receiveMeasurements(){
 
 int main() {
     int group_id, family_num, return_value;
-    pthread_t thread_dev1;
+    pthread_t thread_dev1, thread_dev2;
+
     /*Initializing the netlink socket*/
     netlink_socket = nl_socket_alloc();
 
@@ -92,11 +100,13 @@ int main() {
         return -1;
     }
 
+
     family_num = genl_ctrl_resolve(netlink_socket, NETLINK_FAMILY_NAME);
     if(family_num < 0){
         printf("Invalid Family Name. Exiting... \n");
         return -1;
     }
+
 
     /*resolve generic group*/
     group_id = genl_ctrl_resolve_grp(netlink_socket, NETLINK_FAMILY_NAME, genl_test_mcgrp_names[0]);
@@ -142,7 +152,8 @@ int main() {
         goto failure;
     }
 
-    printf("About to configure matrix \n");
+    printf("About to configure matrix led \n");
+    
     nlmsg_free(msg);
     msg = nlmsg_alloc();
 
@@ -162,7 +173,8 @@ int main() {
         goto failure;
     }
 
-    printf("About to send measurement \n");
+    printf("About to Initiate measurement \n");
+    
     nlmsg_free(msg);
     msg = nlmsg_alloc();
     if(!genlmsg_put(msg, NL_AUTO_PID, NL_AUTO_SEQ, family_num, 0, NLM_F_REQUEST, INITIATE_MEASUREMENT, 0)){
@@ -173,15 +185,27 @@ int main() {
     nl_send_auto(netlink_socket, msg);
 
     return_value = pthread_create(&thread_dev1, NULL, receiveMeasurements, (void *)netlink_socket);
-  /*Check for any configuration errors */
-    // if(nl_recvmsgs(netlink_socket, cb)){
-    //     goto failure;
-    // }
-     if(return_value){
+  
+    if(return_value){
         printf("Error in creating thread for device 1\n");
         goto failure;
     }
     
+    printf("About to relay the display patterns \n");
+    nlmsg_free(msg);
+    msg = nlmsg_alloc();
+    if(!genlmsg_put(msg, NL_AUTO_PID, NL_AUTO_SEQ, family_num, 0, NLM_F_REQUEST, DISPLAY_PATTERN, 0)){
+        printf("Failed to put netlink header. Exiting... \n");
+        return -1;
+    }
+
+    return_value = pthread_create(&thread_dev2, NULL, sendPattern, (void *)netlink_socket);
+  
+    if(return_value){
+        printf("Error in creating thread for device 1\n");
+        goto failure;
+    }
+
     pthread_join(thread_dev1, NULL);
 
 	nl_cb_put(cb);
