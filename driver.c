@@ -587,23 +587,23 @@ static void transfer_complete(void *context){
 
 static int sendPattern(struct spi_device *spi){
     
-    u16 pattern2[16]={0x0104,0x0208,0x030E,0x040B,0x0508,0x06E9,0x07FF,0x0818};
-    u16 pattern1[4]={0x0110,0x0209,0x030F,0x0408};
-    u16 pattern[4] ={0x0c01,0x0900,0x0A0F,0x0B07};
+    // u16 pattern2[16]={0x0104,0x0208,0x030E,0x040B,0x0508,0x06E9,0x07FF,0x0818};
+    u8 pattern1[16]={0x01,0x00,0x02,0x00,0x03,0x00,0x04,0x00,0x05,0x00,0x06,0x00,0x07,0x00,0x08,0x00};
+    u8 pattern[8] ={0x0C,0x01,0x09,0x00,0x0A,0x0F,0x0B,0x07};
 
-    u16 send[1];
+    u8 send[2];
     struct spi_message sp_msg;
-    int g=0;
+    // int g=0;
     struct spi_transfer spi_transfer6={
         .tx_buf = send,
         .rx_buf = 0,
         .len = 2,
-        .bits_per_word = 16,
+        .bits_per_word = 8,
         .speed_hz = 10000000,
         .delay_usecs = 1,
         .cs_change = 1,
     };
-
+    
 
     spi_message_init(&sp_msg);
     sp_msg.complete=&transfer_complete;
@@ -611,95 +611,194 @@ static int sendPattern(struct spi_device *spi){
 
 	spi_sync(spi, &sp_msg);
     DALERT("********************Setting up the registers.********************** \n");
-    for(g=0;g<10;g++){
-        send[0] = pattern[0];
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
+    // for(g=0;g<10;g++){
+        // send[0] = pattern[0];
+        // send[1] = pattern[1];
+        // gpio_set_value(15,0);       
+        // spi_sync(spi, &sp_msg);
+        // gpio_set_value(15,1);
 
-        send[0] = pattern[1];
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
+        // send[0] = pattern[2];
+        // send[1] = pattern[3];
+        // gpio_set_value(15,0);       
+        // spi_sync(spi, &sp_msg);
+        // gpio_set_value(15,1);
 
-        send[0] = pattern[2];
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
+        // send[0] = pattern[4];
+        // send[1] = pattern[5];
+        // gpio_set_value(15,0);       
+        // spi_sync(spi, &sp_msg);
+        // gpio_set_value(15,1);
 
-        send[0] = pattern[3];
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
+        // send[0] = pattern[6];
+        // send[1] = pattern[7];
+        // gpio_set_value(15,0);       
+        // spi_sync(spi, &sp_msg);
+        // gpio_set_value(15,1);
 
-        mdelay(1000);
+        // mdelay(1000);
         send[0] = pattern1[0];
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-
-        send[0] = pattern1[1];
+        send[1] = pattern1[1];
         gpio_set_value(15,0);       
         spi_sync(spi, &sp_msg);
         gpio_set_value(15,1);
 
         send[0] = pattern1[2];
+        send[1] = pattern1[3];
         gpio_set_value(15,0);       
         spi_sync(spi, &sp_msg);
         gpio_set_value(15,1);
 
-        send[0] = pattern1[3];
+        send[0] = pattern1[4];
+        send[1] = pattern1[5];
+        gpio_set_value(15,0);       
+        spi_sync(spi, &sp_msg);
+        gpio_set_value(15,1);
+        
+        send[0] = pattern1[6];
+        send[1] = pattern1[7];
+        gpio_set_value(15,0);       
+        spi_sync(spi, &sp_msg);
+        gpio_set_value(15,1);
+        
+        send[0] = pattern1[8];
+        send[1] = pattern1[9];
         gpio_set_value(15,0);       
         spi_sync(spi, &sp_msg);
         gpio_set_value(15,1);
 
-        mdelay(1000);
-
-        send[0] = pattern2[0];
+        send[0] = pattern1[10];
+        send[1] = pattern1[11];
         gpio_set_value(15,0);       
         spi_sync(spi, &sp_msg);
         gpio_set_value(15,1);
 
-        send[0] = pattern2[1];
+        send[0] = pattern1[12];
+        send[1] = pattern1[13];
         gpio_set_value(15,0);       
         spi_sync(spi, &sp_msg);
         gpio_set_value(15,1);
 
-        send[0] = pattern2[2];
+        send[0] = pattern1[14];
+        send[1] = pattern1[15];
         gpio_set_value(15,0);       
         spi_sync(spi, &sp_msg);
         gpio_set_value(15,1);
 
-        send[0] = pattern2[3];
+        mdelay(100);
+
+        send[0] = 0x01;
+        send[1] = 0x01;
         gpio_set_value(15,0);       
         spi_sync(spi, &sp_msg);
         gpio_set_value(15,1);
+
+        mdelay(100);
+
+        send[0] = 0x02;
+        send[1] = 0x02;
+        gpio_set_value(15,0);       
+        spi_sync(spi, &sp_msg);
+        gpio_set_value(15,1);
+
+        mdelay(100);
+
+        send[0] = 0x03;
+        send[1] = 0x03;
+        gpio_set_value(15,0);       
+        spi_sync(spi, &sp_msg);
+        gpio_set_value(15,1);
+
+        mdelay(100);
+
+        send[0] = 0x04;
+        send[1] = 0x04;
+        gpio_set_value(15,0);       
+        spi_sync(spi, &sp_msg);
+        gpio_set_value(15,1);
+
+        mdelay(100);
+
+        send[0] = 0x05;
+        send[1] = 0x05;
+        gpio_set_value(15,0);       
+        spi_sync(spi, &sp_msg);
+        gpio_set_value(15,1);
+
+        mdelay(100);
+
+        send[0] = 0x06;
+        send[1] = 0x06;
+        gpio_set_value(15,0);       
+        spi_sync(spi, &sp_msg);
+        gpio_set_value(15,1);
+
+        mdelay(100);
+
+        send[0] = 0x07;
+        send[1] = 0x07;
+        gpio_set_value(15,0);       
+        spi_sync(spi, &sp_msg);
+        gpio_set_value(15,1);
+
+        send[0] = 0x08;
+        send[1] = 0x08;
+        gpio_set_value(15,0);       
+        spi_sync(spi, &sp_msg);
+        gpio_set_value(15,1);
+
+        // send[0] = pattern1[1];
+        // gpio_set_value(15,0);       
+        // spi_sync(spi, &sp_msg);
+        // gpio_set_value(15,1);
+
+        // send[0] = pattern1[2];
+        // gpio_set_value(15,0);       
+        // spi_sync(spi, &sp_msg);
+        // gpio_set_value(15,1);
+
+        // send[0] = pattern1[3];
+        // gpio_set_value(15,0);       
+        // spi_sync(spi, &sp_msg);
+        // gpio_set_value(15,1);
+
+        // mdelay(1000);
+
+        // send[0] = pattern2[0];
+        // gpio_set_value(15,0);       
+        // spi_sync(spi, &sp_msg);
+        // gpio_set_value(15,1);
+
+        // send[0] = pattern2[1];
+        // gpio_set_value(15,0);       
+        // spi_sync(spi, &sp_msg);
+        // gpio_set_value(15,1);
+
+        // send[0] = pattern2[2];
+        // gpio_set_value(15,0);       
+        // spi_sync(spi, &sp_msg);
+        // gpio_set_value(15,1);
+
+        // send[0] = pattern2[3];
+        // gpio_set_value(15,0);       
+        // spi_sync(spi, &sp_msg);
+        // gpio_set_value(15,1);
         DALERT("Done sending the messages %d %d %d ", sp_msg.status, sp_msg.actual_length, sp_msg.frame_length);
-    }	
+    // }	
     return 0;
 }
 
 static int setup_device(struct spi_device *spi){
     u8 addr_intensity[2] = {0x09,0x00};
-    u8 addr_decode[2] = {0x0A, 0x07};
+    u8 addr_decode[2] = {0x0A, 0x0F};
     u8 addr_scan_limit[2] = {0x0B, 0x07};
     u8 addr_shutdown[2] = {0x0C, 0x01};
-
+    u8 pattern[8] ={0x0C,0x01,0x09,0x00,0x0A,0x0F,0x0B,0x07};
     struct spi_message sp_msg;
-	    		
+	u8 send[2];    		
 
     struct spi_transfer spi_transfer1 = {
-        .tx_buf = addr_intensity,
-        .rx_buf = 0,
-        .len = 2,
-        .bits_per_word = 16,
-        .speed_hz = 10000000,
-        .delay_usecs = 1,
-        .cs_change = 1,
-    };
-
-    struct spi_transfer spi_transfer2 = {
-        .tx_buf = addr_decode,
+        .tx_buf = send,
         .rx_buf = 0,
         .len = 2,
         .bits_per_word = 8,
@@ -708,25 +807,35 @@ static int setup_device(struct spi_device *spi){
         .cs_change = 1,
     };
 
-    struct spi_transfer spi_transfer3 = {
-        .tx_buf = addr_scan_limit,
-        .rx_buf = 0,
-        .len = 2,
-        .bits_per_word = 8,
-        .speed_hz = 10000000,
-        .delay_usecs = 1,
-        .cs_change = 1,
-    };
+    // struct spi_transfer spi_transfer2 = {
+    //     .tx_buf = addr_decode,
+    //     .rx_buf = 0,
+    //     .len = 2,
+    //     .bits_per_word = 8,
+    //     .speed_hz = 10000000,
+    //     .delay_usecs = 1,
+    //     .cs_change = 1,
+    // };
 
-    struct spi_transfer spi_transfer4 = {
-        .tx_buf = addr_shutdown,
-        .rx_buf = 0,
-        .len = 2,
-        .bits_per_word = 8,
-        .speed_hz = 10000000,
-        .delay_usecs = 1,
-        .cs_change = 1,
-    };
+    // struct spi_transfer spi_transfer3 = {
+    //     .tx_buf = addr_scan_limit,
+    //     .rx_buf = 0,
+    //     .len = 2,
+    //     .bits_per_word = 8,
+    //     .speed_hz = 10000000,
+    //     .delay_usecs = 1,
+    //     .cs_change = 1,
+    // };
+
+    // struct spi_transfer spi_transfer4 = {
+    //     .tx_buf = addr_shutdown,
+    //     .rx_buf = 0,
+    //     .len = 2,
+    //     .bits_per_word = 8,
+    //     .speed_hz = 10000000,
+    //     .delay_usecs = 1,
+    //     .cs_change = 1,
+    // };
     
     // struct spi_transfer spi_transfer6 = {
     //     .tx_buf = &pattern,
@@ -739,18 +848,44 @@ static int setup_device(struct spi_device *spi){
     // };
     DALERT("********************Setting up the registers.********************** \n");
     spi_message_init(&sp_msg);
+    sp_msg.complete=&transfer_complete;
+    spi_message_add_tail((void *)&spi_transfer1, &sp_msg);
 
-    spi_message_add_tail((void *)&spi_transfer4, &sp_msg);
-	spi_message_add_tail((void *)&spi_transfer1, &sp_msg);
-    spi_message_add_tail((void *)&spi_transfer2, &sp_msg);
-    spi_message_add_tail((void *)&spi_transfer3, &sp_msg);
+	spi_sync(spi, &sp_msg);
+
+        send[0] = pattern[0];
+        send[1] = pattern[1];
+        gpio_set_value(15,0);       
+        spi_sync(spi, &sp_msg);
+        gpio_set_value(15,1);
+
+        send[0] = pattern[2];
+        send[1] = pattern[3];
+        gpio_set_value(15,0);       
+        spi_sync(spi, &sp_msg);
+        gpio_set_value(15,1);
+
+        send[0] = pattern[4];
+        send[1] = pattern[5];
+        gpio_set_value(15,0);       
+        spi_sync(spi, &sp_msg);
+        gpio_set_value(15,1);
+
+        send[0] = pattern[6];
+        send[1] = pattern[7];
+        gpio_set_value(15,0);       
+        spi_sync(spi, &sp_msg);
+        gpio_set_value(15,1);
+	// spi_message_add_tail((void *)&spi_transfer1, &sp_msg);
+    // spi_message_add_tail((void *)&spi_transfer2, &sp_msg);
+    // spi_message_add_tail((void *)&spi_transfer3, &sp_msg);
     // spi_message_add_tail((void *)&spi_transfer5, &sp_msg);
     // spi_message_add_tail((void *)&spi_transfer1, &sp_msg);
 	
-    gpio_set_value(15,0);
-	spi_sync(spi, &sp_msg);
-	gpio_set_value(15,1);	
-    DALERT("Done sending the messages %d %d %d ", sp_msg.status, sp_msg.actual_length, sp_msg.frame_length);	
+    // gpio_set_value(15,0);
+	// spi_sync(spi, &sp_msg);
+	// gpio_set_value(15,1);	
+    DALERT("Done sending the messages ------------- %d %d %d ", sp_msg.status, sp_msg.actual_length, sp_msg.frame_length);	
     return 0;
 }
 
