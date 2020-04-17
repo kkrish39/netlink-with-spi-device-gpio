@@ -11,8 +11,6 @@
 #include <linux/interrupt.h>
 #include <linux/math64.h>
 #include <linux/spinlock.h>
-#include <linux/kthread.h>
-#include <linux/workqueue.h>
 
 #include "genl_ex.h"
 #include "hcsr04_structures.h"
@@ -39,26 +37,20 @@ static struct spi_device_id spi_deviceId_table[]={
     {"MAX7219", 0}
 };
 
-
-struct work_queue {
-	struct work_struct work;
-	struct hcsr04_dev *parameter;
-} work_queue;
-
 struct hcsr04_dev *hcsr04_devp;
-
-struct spi_device *found_device;
 
 int configureDotMatrix(void);
 static void send_message_to_user_processes(unsigned int group);
 static void send_distance(unsigned int group, int distance);
+static void terminate_operation(unsigned int group);
+static int send_pattern(void *hcsr04_wq);
 
 /*Function to keep the most recently measured data*/
 void writeToCircularBuffer(long distance, long long timestamp, struct hcsr04_dev *hcsr04_devp){
     DPRINTK("Writing into the circular buffer \n");
     hcsr04_devp->list = addNode(hcsr04_devp->list, initNode(distance, timestamp));
     // hcsr04_devp->isEnabled = 0;
-    mutex_unlock(&hcsr04_devp->sampleRunning);
+    // mutex_unlock(&hcsr04_devp->sampleRunning);
 }
 
 /*Function to clear Buffer*/
@@ -81,9 +73,10 @@ void triggerPulse(struct hcsr04_dev *hcsr04_devp){
 }
 
 /*Function to perform the distance measurement operation for the given criteria*/
-void measureDistance(struct work_struct *hcsr04_wq){
-    int g=0;
-    for(g=0;g<50;g++){
+void measure_distance(struct work_struct *hcsr04_wq){
+    int numIterations=0;
+    for(numIterations=0; numIterations < hcsr04_devp->timeToStopMeasurment; numIterations++){
+       
         int i = 0;
         int sum = 0;
         long long time = 0;
@@ -93,9 +86,9 @@ void measureDistance(struct work_struct *hcsr04_wq){
         long outlier_max = LONG_MIN;
         int average_distance;
 
-        struct work_queue *wq = container_of(hcsr04_wq, struct work_queue, work);
+        struct work_queue_hcsr *wq = container_of(hcsr04_wq, struct work_queue_hcsr, work);
         struct hcsr04_dev *hcsr04_devp = wq->parameter;
-
+        mutex_lock(&hcsr04_devp->lock);
         for(i=0;i<hcsr04_devp->num_samples_per_measurement+2;i++){
             /*Trigger pulse to take nth Measurement*/
             triggerPulse(hcsr04_devp);
@@ -108,6 +101,7 @@ void measureDistance(struct work_struct *hcsr04_wq){
                 hcsr04_devp->trig_time = 0;
                 hcsr04_devp->echo_time = 0;
                 mdelay(hcsr04_devp->sampling_period);
+                mutex_unlock(&hcsr04_devp->lock);
                 continue;
             }
             
@@ -124,6 +118,7 @@ void measureDistance(struct work_struct *hcsr04_wq){
                 hcsr04_devp->trig_time = 0;
                 hcsr04_devp->echo_time = 0;
                 mdelay(hcsr04_devp->sampling_period);
+                mutex_unlock(&hcsr04_devp->lock);
                 continue;
             }
             DPRINTK("Time Diff %lld \t ", time);
@@ -152,18 +147,37 @@ void measureDistance(struct work_struct *hcsr04_wq){
         sum = div_u64(sum, hcsr04_devp->num_samples_per_measurement);
         average_distance = sum;
         DALERT("#AVERAGE_DISTANCE: %d \n", average_distance);
-        writeToCircularBuffer(average_distance, native_read_tsc(),hcsr04_devp);
+        // writeToCircularBuffer(average_distance, native_read_tsc(),hcsr04_devp);
         send_distance(GROUP0, average_distance);
+        mutex_unlock(&hcsr04_devp->sampleRunning);
     }
+    terminate_operation(GROUP0);
 }
 
+
 /*Function to spawn k-thread*/
-static int spawnThread(struct hcsr04_dev *hcsr04_devp){
-    /*Initialize the work and assign the requried parameters*/
-    INIT_WORK(&hcsr04_devp->test_wq->work, measureDistance);
-    hcsr04_devp->test_wq->parameter = hcsr04_devp;
+static int spawn_thread_display_pattern(struct hcsr04_dev *hcsr04_devp, uint16_t *pattern){
+    // /*Initialize the work and assign the requried parameters*/
+    // INIT_WORK(&hcsr04_devp->test_led_wq->work, send_pattern);
+    // hcsr04_devp->test_led_wq->parameter = pattern;
+    // DALERT("About to spawn thread \n");
+    // schedule_work(&hcsr04_devp->test_led_wq->work);
+    // hcsr04_devp->isWorkInitialized=1;
+    static struct task_struct *worker_task;
+    worker_task =  kthread_create(send_pattern,(void *)pattern,"thread");
+    kthread_bind(worker_task,get_cpu());
+    wake_up_process(worker_task);
+    return 0;
+}
+
+
+/*Function to spawn k-thread*/
+static int spawn_thread_distance_measurement(struct hcsr04_dev *hcsr04_devp){
+    /*Initialize the work and assign the requried parameterstruct hcsr04_dev *hcsr04_devps*/
+    INIT_WORK(&hcsr04_devp->test_hcsr_wq->work, measure_distance);
+    hcsr04_devp->test_hcsr_wq->parameter = hcsr04_devp;
     DALERT("About to spawn thread \n");
-    schedule_work(&hcsr04_devp->test_wq->work);
+    schedule_work(&hcsr04_devp->test_hcsr_wq->work);
     hcsr04_devp->isWorkInitialized=1;
 
     return 0;
@@ -493,7 +507,6 @@ static void send_distance(unsigned int group, int distance){
 
     snprintf(msg, MAX_BUF_LENGTH, "Hello group %s\n", genl_test_mcgrp_names[group]);
     nla_put_flag(sk_buf, RET_VAL_SUCCESS);
-    res = nla_put_string(sk_buf, CALLBACK_IDENTIFIER, msg);
     res = nla_put_u32(sk_buf,DISTANCE_MEASURE, distance);
     if (res) {
         printk(KERN_ERR "%d: err %d ", __LINE__, res);
@@ -504,10 +517,38 @@ static void send_distance(unsigned int group, int distance){
     genlmsg_multicast(&genl_netlink_family, sk_buf, 0, group, flags);
     return;
 }
+
+static void terminate_operation(unsigned int group){
+    void *header;
+    int res, flags = GFP_ATOMIC;
+    struct sk_buff* sk_buf = genlmsg_new(NLMSG_DEFAULT_SIZE, flags);
+
+    if (!sk_buf) {
+        DALERT("Failed to create a new generic message. \n");
+        return;
+    }
+
+    header = genlmsg_put(sk_buf, 0, 0, &genl_netlink_family, flags, CONFIGURE_HCSR04);
+    if (!header) {
+        DALERT("Error in creating the sk_buf header \n");
+        return;
+    }
+    res = nla_put_flag(sk_buf, RET_VAL_SUCCESS);
+    res = nla_put_flag(sk_buf, TERMINATE_OPERATION);
+    if (res) {
+        printk(KERN_ERR "%d: err %d ", __LINE__, res);
+        return;
+    }
+
+    genlmsg_end(sk_buf, header);
+    genlmsg_multicast(&genl_netlink_family, sk_buf, 0, group, flags);
+    return;
+}
+
+
 static void send_message_to_user_processes(unsigned int group){
     void *header;
     int res, flags = GFP_ATOMIC;
-    char msg[MAX_BUF_LENGTH];
     struct sk_buff* sk_buf = genlmsg_new(NLMSG_DEFAULT_SIZE, flags);
 
     if (!sk_buf) {
@@ -521,9 +562,7 @@ static void send_message_to_user_processes(unsigned int group){
         goto nlmsg_fail;
     }
 
-    snprintf(msg, MAX_BUF_LENGTH, "Hello group %s\n", genl_test_mcgrp_names[group]);
-    nla_put_flag(sk_buf, RET_VAL_SUCCESS);
-    res = nla_put_string(sk_buf, CALLBACK_IDENTIFIER, msg);
+    res = nla_put_flag(sk_buf, RET_VAL_SUCCESS);
     if (res) {
         printk(KERN_ERR "%d: err %d ", __LINE__, res);
         goto nlmsg_fail;
@@ -542,7 +581,6 @@ nlmsg_fail:
 static int configure_hcsr04_device (struct sk_buff* sk_buf, struct genl_info* info){
     config_input input_pins;
     setparam_input input_params;
-    DALERT("About to configure the devices \n");
     if(!info->attrs[HCSR04_TRIGGER_PIN] || !info->attrs[HCSR04_ECHO_PIN] || !info->attrs[HCSR04_SAMPLING_PERIOD] || !info->attrs[HCSRO4_NUMBER_SAMPLES]){
         DALERT("Empty data is sent from the user. Exiting... \n");
         return -EINVAL;
@@ -553,7 +591,6 @@ static int configure_hcsr04_device (struct sk_buff* sk_buf, struct genl_info* in
     input_params.sampling_period = nla_get_u32(info->attrs[HCSR04_SAMPLING_PERIOD]);
     input_params.num_samples = nla_get_u32(info->attrs[HCSRO4_NUMBER_SAMPLES]);
 
-    DALERT("%d  %d  %d  %d", input_pins.echo_pin, input_pins.trigger_pin, input_params.sampling_period, input_params.num_samples);
     if(configure_IO_pins(&input_pins, hcsr04_devp) < 0){
         DALERT("Configuring HCSR04 I/O pins failed");
         return -EINVAL;
@@ -570,324 +607,164 @@ static void transfer_complete(void *context){
     DALERT("The transfer is completed successfully");
 }
 
-static int sendPattern(struct spi_device *spi){
-    
-    // u16 pattern2[16]={0x0104,0x0208,0x030E,0x040B,0x0508,0x06E9,0x07FF,0x0818};
-    u8 pattern1[16]={0x01,0x00,0x02,0x00,0x03,0x00,0x04,0x00,0x05,0x00,0x06,0x00,0x07,0x00,0x08,0x00};
-    u8 pattern[8] ={0x0C,0x01,0x09,0x00,0x0A,0x0F,0x0B,0x07};
-
-    u8 send[2];
+static void clear_display(struct spi_device *spi){
+    uint16_t pattern1[16]={0x0100,0x0200,0x0300,0x0400,0x0500,0x0600,0x0700,0x0800};
+    int i=0;
+    uint16_t send[1];
     struct spi_message sp_msg;
-    // int g=0;
-    struct spi_transfer spi_transfer6={
+    struct spi_transfer spi_transfer1={
         .tx_buf = send,
         .rx_buf = 0,
         .len = 2,
-        .bits_per_word = 8,
+        .bits_per_word = 16,
         .speed_hz = 10000000,
         .delay_usecs = 1,
         .cs_change = 1,
     };
     
 
-    spi_message_init(&sp_msg);
-    sp_msg.complete=&transfer_complete;
-    spi_message_add_tail((void *)&spi_transfer6, &sp_msg);
-
-	spi_sync(spi, &sp_msg);
-    DALERT("********************Setting up the registers.********************** \n");
-    // for(g=0;g<10;g++){
-        // send[0] = pattern[0];
-        // send[1] = pattern[1];
-        // gpio_set_value(15,0);       
-        // spi_sync(spi, &sp_msg);
-        // gpio_set_value(15,1);
-
-        // send[0] = pattern[2];
-        // send[1] = pattern[3];
-        // gpio_set_value(15,0);       
-        // spi_sync(spi, &sp_msg);
-        // gpio_set_value(15,1);
-
-        // send[0] = pattern[4];
-        // send[1] = pattern[5];
-        // gpio_set_value(15,0);       
-        // spi_sync(spi, &sp_msg);
-        // gpio_set_value(15,1);
-
-        // send[0] = pattern[6];
-        // send[1] = pattern[7];
-        // gpio_set_value(15,0);       
-        // spi_sync(spi, &sp_msg);
-        // gpio_set_value(15,1);
-
-        // mdelay(1000);
-        send[0] = pattern1[0];
-        send[1] = pattern1[1];
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-
-        send[0] = pattern1[2];
-        send[1] = pattern1[3];
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-
-        send[0] = pattern1[4];
-        send[1] = pattern1[5];
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-        
-        send[0] = pattern1[6];
-        send[1] = pattern1[7];
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-        
-        send[0] = pattern1[8];
-        send[1] = pattern1[9];
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-
-        send[0] = pattern1[10];
-        send[1] = pattern1[11];
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-
-        send[0] = pattern1[12];
-        send[1] = pattern1[13];
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-
-        send[0] = pattern1[14];
-        send[1] = pattern1[15];
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-
-        mdelay(100);
-
-        send[0] = 0x01;
-        send[1] = 0x01;
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-
-        mdelay(100);
-
-        send[0] = 0x02;
-        send[1] = 0x02;
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-
-        mdelay(100);
-
-        send[0] = 0x03;
-        send[1] = 0x03;
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-
-        mdelay(100);
-
-        send[0] = 0x04;
-        send[1] = 0x04;
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-
-        mdelay(100);
-
-        send[0] = 0x05;
-        send[1] = 0x05;
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-
-        mdelay(100);
-
-        send[0] = 0x06;
-        send[1] = 0x06;
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-
-        mdelay(100);
-
-        send[0] = 0x07;
-        send[1] = 0x07;
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-
-        send[0] = 0x08;
-        send[1] = 0x08;
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-
-        // send[0] = pattern1[1];
-        // gpio_set_value(15,0);       
-        // spi_sync(spi, &sp_msg);
-        // gpio_set_value(15,1);
-
-        // send[0] = pattern1[2];
-        // gpio_set_value(15,0);       
-        // spi_sync(spi, &sp_msg);
-        // gpio_set_value(15,1);
-
-        // send[0] = pattern1[3];
-        // gpio_set_value(15,0);       
-        // spi_sync(spi, &sp_msg);
-        // gpio_set_value(15,1);
-
-        // mdelay(1000);
-
-        // send[0] = pattern2[0];
-        // gpio_set_value(15,0);       
-        // spi_sync(spi, &sp_msg);
-        // gpio_set_value(15,1);
-
-        // send[0] = pattern2[1];
-        // gpio_set_value(15,0);       
-        // spi_sync(spi, &sp_msg);
-        // gpio_set_value(15,1);
-
-        // send[0] = pattern2[2];
-        // gpio_set_value(15,0);       
-        // spi_sync(spi, &sp_msg);
-        // gpio_set_value(15,1);
-
-        // send[0] = pattern2[3];
-        // gpio_set_value(15,0);       
-        // spi_sync(spi, &sp_msg);
-        // gpio_set_value(15,1);
-        DALERT("Done sending the messages %d %d %d ", sp_msg.status, sp_msg.actual_length, sp_msg.frame_length);
-    // }	
-    return 0;
-}
-
-static int setup_device(struct spi_device *spi){
-    u8 addr_intensity[2] = {0x09,0x00};
-    u8 addr_decode[2] = {0x0A, 0x0F};
-    u8 addr_scan_limit[2] = {0x0B, 0x07};
-    u8 addr_shutdown[2] = {0x0C, 0x01};
-    u8 pattern[8] ={0x0C,0x01,0x09,0x00,0x0A,0x0F,0x0B,0x07};
-    struct spi_message sp_msg;
-	u8 send[2];    		
-
-    struct spi_transfer spi_transfer1 = {
-        .tx_buf = send,
-        .rx_buf = 0,
-        .len = 2,
-        .bits_per_word = 8,
-        .speed_hz = 10000000,
-        .delay_usecs = 1,
-        .cs_change = 1,
-    };
-
-    // struct spi_transfer spi_transfer2 = {
-    //     .tx_buf = addr_decode,
-    //     .rx_buf = 0,
-    //     .len = 2,
-    //     .bits_per_word = 8,
-    //     .speed_hz = 10000000,
-    //     .delay_usecs = 1,
-    //     .cs_change = 1,
-    // };
-
-    // struct spi_transfer spi_transfer3 = {
-    //     .tx_buf = addr_scan_limit,
-    //     .rx_buf = 0,
-    //     .len = 2,
-    //     .bits_per_word = 8,
-    //     .speed_hz = 10000000,
-    //     .delay_usecs = 1,
-    //     .cs_change = 1,
-    // };
-
-    // struct spi_transfer spi_transfer4 = {
-    //     .tx_buf = addr_shutdown,
-    //     .rx_buf = 0,
-    //     .len = 2,
-    //     .bits_per_word = 8,
-    //     .speed_hz = 10000000,
-    //     .delay_usecs = 1,
-    //     .cs_change = 1,
-    // };
-    
-    // struct spi_transfer spi_transfer6 = {
-    //     .tx_buf = &pattern,
-    //     .rx_buf = 0,
-    //     .len = 2,
-    //     .bits_per_word = 8,
-    //     .speed_hz = 10000000,
-    //     .delay_usecs = 1,
-    //     .cs_change = 1,
-    // };
-    DALERT("********************Setting up the registers.********************** \n");
     spi_message_init(&sp_msg);
     sp_msg.complete=&transfer_complete;
     spi_message_add_tail((void *)&spi_transfer1, &sp_msg);
 
 	spi_sync(spi, &sp_msg);
-
-        send[0] = pattern[0];
-        send[1] = pattern[1];
+    for(i=0;i<8;i++){
+        send[0] = pattern1[0];
         gpio_set_value(15,0);       
         spi_sync(spi, &sp_msg);
         gpio_set_value(15,1);
+    }
+}
 
-        send[0] = pattern[2];
-        send[1] = pattern[3];
+static int send_pattern(void *patternn){
+
+    // struct work_queue_led *wq = container_of(hcsr04_wq, struct work_queue_led, work);
+    uint16_t *pattern = (uint16_t *)patternn;
+    
+    uint16_t send[1];
+    struct spi_message sp_msg;
+    int i=0;
+    struct spi_transfer spi_transfer={
+        .tx_buf = send,
+        .rx_buf = 0,
+        .len = 2,
+        .bits_per_word = 16,
+        .speed_hz = 10000000,
+        .delay_usecs = 1,
+        .cs_change = 1,
+    };
+    mutex_lock(&hcsr04_devp->sampleRunning);
+    spi_message_init(&sp_msg);
+    sp_msg.complete=&transfer_complete;
+    spi_message_add_tail((void *)&spi_transfer, &sp_msg);
+
+	spi_sync(hcsr04_devp->found_device, &sp_msg);
+    
+    for(i=0;i<8;i++){
+        send[0] = pattern[i];
         gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
+        spi_sync(hcsr04_devp->found_device, &sp_msg);
         gpio_set_value(15,1);
 
-        send[0] = pattern[4];
-        send[1] = pattern[5];
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
+        mdelay(hcsr04_devp->pattern_delay);
+    }
+    DALERT("Done sending the messages %d %d %d ", sp_msg.status, sp_msg.actual_length, sp_msg.frame_length);
+    mutex_unlock(&hcsr04_devp->lock);
+    
+    return 0;
+}
 
-        send[0] = pattern[6];
-        send[1] = pattern[7];
-        gpio_set_value(15,0);       
-        spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
-	// spi_message_add_tail((void *)&spi_transfer1, &sp_msg);
-    // spi_message_add_tail((void *)&spi_transfer2, &sp_msg);
-    // spi_message_add_tail((void *)&spi_transfer3, &sp_msg);
-    // spi_message_add_tail((void *)&spi_transfer5, &sp_msg);
-    // spi_message_add_tail((void *)&spi_transfer1, &sp_msg);
-	
-    // gpio_set_value(15,0);
-	// spi_sync(spi, &sp_msg);
-	// gpio_set_value(15,1);	
+static int setup_device(struct spi_device *spi){
+    struct spi_message sp_msg;
+
+    uint16_t addr_intensity = 0x0900;
+    uint16_t addr_decode = 0x0A0F;
+    uint16_t addr_scan_limit = 0x0B07;
+    uint16_t addr_shutdown = 0x0C01;
+    // uint16_t pattern[8] ={0x0C,0x01,0x09,0x00,0x0A,0x0F,0x0B,0x07};
+
+	uint16_t sendData[1];    		
+
+    struct spi_transfer spi_transfer = {
+        .tx_buf = sendData,
+        .rx_buf = 0,
+        .len = 2,
+        .bits_per_word = 16,
+        .speed_hz = 10000000,
+        .delay_usecs = 1,
+        .cs_change = 1,
+    };
+
+    spi_message_init(&sp_msg);
+    sp_msg.complete=&transfer_complete;
+    spi_message_add_tail((void *)&spi_transfer, &sp_msg);
+	spi_sync(spi, &sp_msg);
+
+    sendData[0] = addr_shutdown;
+    gpio_set_value(15,0);       
+    spi_sync(spi, &sp_msg);
+    gpio_set_value(15,1);
+
+    sendData[0] = addr_intensity;
+    gpio_set_value(15,0);       
+    spi_sync(spi, &sp_msg);
+    gpio_set_value(15,1);
+
+    sendData[0] = addr_decode;
+    gpio_set_value(15,0);       
+    spi_sync(spi, &sp_msg);
+    gpio_set_value(15,1);
+
+    sendData[0] = addr_scan_limit;
+    gpio_set_value(15,0);       
+    spi_sync(spi, &sp_msg);
+    gpio_set_value(15,1);	
+
+    clear_display(spi);
     DALERT("Done sending the messages ------------- %d %d %d ", sp_msg.status, sp_msg.actual_length, sp_msg.frame_length);	
     return 0;
 }
 
 static int configure_max7219_device (struct sk_buff* sk_buf, struct genl_info* info){
     printk("About to configure max7219 \n");
+    
     send_message_to_user_processes(GROUP0);
     return 0;
 }
 static int start_distance_measurement (struct sk_buff* sk_buf, struct genl_info* info){
+    int secondsToRun;
     DALERT("About to start the distance measurment \n");
-    spawnThread(hcsr04_devp);
+
+    if(!info->attrs[HCSR04_SECONDS_TO_RUN]){
+        secondsToRun = 60;  //Assigning a default value if there is no data is sent.
+    }else{  
+        secondsToRun = nla_get_u32(info->attrs[HCSR04_SECONDS_TO_RUN]);
+    }
+
+
+    hcsr04_devp->timeToStopMeasurment = secondsToRun;
+    DALERT("%d", hcsr04_devp->timeToStopMeasurment);
+    spawn_thread_distance_measurement(hcsr04_devp);
     return 0;
 }
 
 static int send_pattern_to_matrix_led (struct sk_buff* sk_buf, struct genl_info* info){
-    DALERT("Sending Pattern to led");
-    sendPattern(found_device);
+    uint16_t *data;
+    // DALERT("Sending Pattern to led \n");
+
+    if(!info->attrs[DISPLAY_PATTERN]){
+        DALERT("No Pattern has been received \n");
+        return 0;
+    }
+
+    data = (uint16_t *)nla_data(info->attrs[DISPLAY_PATTERN]);
+
+    if(!info->attrs[DELAY_TIME]){
+        DALERT("No delay time received \n");
+        return 0;
+    }
+    hcsr04_devp->pattern_delay = nla_get_u32(info->attrs[DELAY_TIME]);
+    spawn_thread_display_pattern(hcsr04_devp,data);
     return 0;
 }
 
@@ -1013,9 +890,6 @@ static struct genl_family genl_netlink_family = {
 };
 
 
-
-/************************************************************************************************************************************************************/
-
 static int initializeDevice(void){
     
     if(set_gpio_pins_for_max7219()){
@@ -1025,11 +899,10 @@ static int initializeDevice(void){
 
     DALERT("GPIO pins are configured successfully for Led Matrix device\n");
     DALERT("About to set up the device. \n");
-    if(setup_device(found_device)){
+    if(setup_device(hcsr04_devp->found_device)){
         DALERT("Failed to initialize the found device\n");
         return -EINVAL;
     }
-    
     return 0;
 }
 
@@ -1040,7 +913,7 @@ static int removeDevice(void){
 
 static int spi_driver_probe(struct spi_device *spi){
     DALERT("Found a matching device. Device name: %s \n", spi->modalias);
-    found_device = spi;
+    hcsr04_devp->found_device = spi;
     
     if(initializeDevice()){
         DALERT("Failed to Initialize the found device. \n");
@@ -1099,7 +972,8 @@ static int __init spi_netlink_init(void){
     hcsr04_devp->isWorkInitialized = 0;
     
     /*Initialize work queue*/
-    hcsr04_devp->test_wq = kmalloc(sizeof(struct work_queue *), GFP_KERNEL);
+    hcsr04_devp->test_hcsr_wq = kmalloc(sizeof(struct work_queue_hcsr *), GFP_KERNEL);
+    hcsr04_devp->test_led_wq = kmalloc(sizeof(struct work_queue_led *), GFP_KERNEL);
 
     /*Initializing mutexes*/
     mutex_init(&hcsr04_devp->lock);
@@ -1119,6 +993,9 @@ static void spi_netlink_exit(void){
 
     spi_unregister_driver(&spi_driver);
     DALERT("Driver and Generic unregistration successful.\n");
+
+    unregister_pin(hcsr04_devp, true);
+    unregister_pin(hcsr04_devp, false);
 }
 
 module_init(spi_netlink_init);

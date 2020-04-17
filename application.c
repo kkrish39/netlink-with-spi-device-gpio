@@ -18,9 +18,9 @@
 
 #define USER_HCSR04_ECHO_PIN 5
 #define USER_HCSR04_TRIGGER_PIN 1
-#define USER_SAMPLING_PERIOD 70
-#define USER_NUM_SAMPLES 4
-#define NUM_MINUTES_TO_RUN 2
+#define USER_SAMPLING_PERIOD 80
+#define USER_NUM_SAMPLES 8
+#define USER_NUM_SECONDS_TO_RUN 20
 
 #define SPI_SCK_PIN 13
 #define SPI_MOSI_PIN 11
@@ -29,6 +29,12 @@
 static struct nl_sock *netlink_socket;
 static struct nl_msg *msg;
 static struct nl_cb *cb = NULL;
+pthread_mutex_t read_write_lock;
+
+
+static int should_send_recv = 1;
+static int measuredDistance;
+static int currentDistance;
 
 static int skip_seq_check(struct nl_msg *msg, void *arg)
 {
@@ -45,34 +51,72 @@ static int callback_handler(struct nl_msg *msg, void* arg)
 
 	genlmsg_parse(nlmsg_hdr(msg), 0, attr, GENL_TEST_ATTR_MAX, genl_test_policy);
 
-    if(!nla_get_flag(attr[RET_VAL_SUCCESS])){
-        printf("***************************Encountered an error*************************** \n");
-        if(attr[OPTIONAL_ERROR_MESSAGE]){
-            printf("The Following error occured: %s \n", nla_get_string(attr[OPTIONAL_ERROR_MESSAGE]));
-        }
-        return -1;
-    }
+    // if(!nla_get_flag(attr[RET_VAL_SUCCESS])){
+    //     printf("***************************Encountered an error*************************** \n");
+    //     if(attr[OPTIONAL_ERROR_MESSAGE]){
+    //         printf("The Following error occured: %s \n", nla_get_string(attr[OPTIONAL_ERROR_MESSAGE]));
+    //     }
+    //     return -1;
+    // }
 
-	if (!attr[CALLBACK_IDENTIFIER]) {
-		fprintf(stdout, "\t\t\t\tKernel sent empty message!! \n");
-		return NL_OK;
-	}
+    if(attr[TERMINATE_OPERATION]){
+        printf("Received a termination command. Exiting... \n");
+        should_send_recv = 0;
+        return 0;
+    }
 
     if(attr[DISTANCE_MEASURE]){
+        pthread_mutex_lock(&read_write_lock);
+        measuredDistance = nla_get_u32(attr[DISTANCE_MEASURE]);
         printf("Received the distance measure: %d \n", nla_get_u32(attr[DISTANCE_MEASURE]));
+        pthread_mutex_unlock(&read_write_lock);
     }
-    printf("\t\t\t\tEntering the data \n");
 	return NL_OK;
 }
 
 void *sendPattern(){
-    while(1){
-        nl_send_auto(netlink_socket, msg);
+    printf("About to relay the patterns indefinitely \n");
+    int toggleFlag = 0;
+    u_int16_t clearDisplay[8] = {0x0100,0x0200,0x0300,0x0400,0x0500,0x0600,0x0700,0x0800};
+    u_int16_t pattern1[8] = {0x010F,0x020F,0x030F,0x040F,0x050F,0x060F,0x070F,0x080F};
+    u_int16_t pattern3[8] = {0x0800,0x0700,0x0600,0x0500,0x0400,0x0300,0x0200,0x0100};
+
+    nla_put(msg,DISPLAY_PATTERN,sizeof(clearDisplay),(void *)clearDisplay);
+    nl_send_auto(netlink_socket, msg);
+
+   while(should_send_recv){
+        pthread_mutex_lock(&read_write_lock);
+        toggleFlag = measuredDistance >= currentDistance;
+        currentDistance = measuredDistance;
+        pthread_mutex_unlock(&read_write_lock);
+        if(toggleFlag){
+            nla_put(msg,DISPLAY_PATTERN,sizeof(pattern1),(void *)pattern1);
+            nla_put_u32(msg,DELAY_TIME,10);
+            nl_send_auto(netlink_socket, msg);
+            // sleep(2)
+            nla_put(msg,DISPLAY_PATTERN,sizeof(pattern3),(void *)pattern3);
+            nla_put_u32(msg,DELAY_TIME,10);
+            nl_send_auto(netlink_socket, msg);
+        }else{
+            // printf("\t\t\t\t\t\t\tSlowing down******************************* \n");
+            nla_put(msg,DISPLAY_PATTERN,sizeof(pattern1),(void *)pattern1);
+            nla_put_u32(msg,DELAY_TIME,100);
+            nl_send_auto(netlink_socket, msg);
+            nla_put(msg,DISPLAY_PATTERN,sizeof(pattern3),(void *)pattern3);
+            nla_put_u32(msg,DELAY_TIME,100);
+            nl_send_auto(netlink_socket, msg);
+       }
     }
+
+    nla_put(msg,DISPLAY_PATTERN,sizeof(clearDisplay),(void *)clearDisplay);
+    nla_put_u32(msg,DELAY_TIME,0);
+    nl_send_auto(netlink_socket, msg);
+
+    pthread_exit(NULL);
 }
 
 void *receiveMeasurements(){
-    while(1){
+    while(should_send_recv){
         if(nl_recvmsgs(netlink_socket, cb)){
             printf("Received a message from the kernel. \n");
         }
@@ -143,6 +187,7 @@ int main() {
     nla_put_u32(msg, HCSR04_TRIGGER_PIN, USER_HCSR04_TRIGGER_PIN);
     nla_put_u32(msg, HCSR04_SAMPLING_PERIOD,USER_SAMPLING_PERIOD);
     nla_put_u32(msg, HCSRO4_NUMBER_SAMPLES, USER_NUM_SAMPLES);
+    nla_put_u32(msg, HCSR04_SECONDS_TO_RUN, USER_NUM_SECONDS_TO_RUN);
 
     /*Send Request to configure the HCSR04 device*/
     nl_send_auto(netlink_socket, msg);
@@ -207,7 +252,7 @@ int main() {
     }
 
     pthread_join(thread_dev1, NULL);
-
+    pthread_join(thread_dev2, NULL);
 	nl_cb_put(cb);
 
 failure:
