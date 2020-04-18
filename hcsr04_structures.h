@@ -49,17 +49,12 @@ static int lookupTable[4][20]= {
 static int validEchoPins[14] = {0,0,1,1,1,1,1,0,0,1,0,1,0,1};
 
 /*Valid Trigger pins with L/H/R/F Interrupt modes*/
-static int validTriggerPins[14] = {1,1,1,1,1,1,1,0,0,1,1,1,1,1};
+static int validTriggerPins[14] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1};
 
-
+/*Work queue to take care of the measurement operation*/
 struct work_queue_hcsr {
 	struct work_struct work;
 	struct hcsr04_dev *parameter;
-};
-
-struct work_queue_led {
-	struct work_struct work;
-	uint16_t  *parameter;
 };
 
 /* per device structure */
@@ -67,6 +62,7 @@ struct hcsr04_dev {
 	char name[20]; /* Name of the device */
     pins echo_pin; /*pin structure to keep track of related gpio pins for echo pin*/
     pins trigger_pin; /*pin structure to keep track of related gpio pins for echo pin*/
+    pins chip_select_pin;
     unsigned long long time_stamp; /*time when the distance is recorded */
     int distance;/*The distance measure in centimeter*/
     circular_buf *list; /*Kernel fifo buffer*/
@@ -77,9 +73,7 @@ struct hcsr04_dev {
     int isWorkInitialized; /*Flag to keep track whether workQueue is initialized*/
     int irq_number; /*IRQ number that is being generated for the given echo pin*/
     struct work_queue_hcsr *test_hcsr_wq; /*Workqueue specific for each device */
-    struct work_queue_led  *test_led_wq;
     struct mutex lock, sampleRunning; /*per-device locks to enforce synchronization*/
     int timeToStopMeasurment; /*Keep track the time to halt the distance measurement*/
     struct spi_device *found_device; /*Structure the save the found SPI device */
-    int pattern_delay; /*Dealy while displaying the pattern */
 };

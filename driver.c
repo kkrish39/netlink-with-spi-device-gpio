@@ -16,6 +16,8 @@
 #include "hcsr04_structures.h"
 
 #define ALERT
+#define DEBUG
+static DEFINE_SPINLOCK(sp_lock_irq);
 
 #if defined(ALERT)
     #define DALERT(fmt, args...) printk(KERN_ALERT "INFO:"fmt, ##args)
@@ -31,6 +33,8 @@
 
 #define HCSR_DEVICE_NAME "HCSR04"
 #define LED_DEVICE_NAME "MAX7219"
+
+/*Struct to keep track of the netlink family properties*/
 static struct genl_family genl_netlink_family;
 
 static struct spi_device_id spi_deviceId_table[]={
@@ -43,7 +47,7 @@ int configureDotMatrix(void);
 static void send_message_to_user_processes(unsigned int group);
 static void send_distance(unsigned int group, int distance);
 static void terminate_operation(unsigned int group);
-static int send_pattern(void *hcsr04_wq);
+static void send_pattern(uint16_t *pattern);
 
 /*Function to keep the most recently measured data*/
 void writeToCircularBuffer(long distance, long long timestamp, struct hcsr04_dev *hcsr04_devp){
@@ -88,7 +92,7 @@ void measure_distance(struct work_struct *hcsr04_wq){
 
         struct work_queue_hcsr *wq = container_of(hcsr04_wq, struct work_queue_hcsr, work);
         struct hcsr04_dev *hcsr04_devp = wq->parameter;
-        mutex_lock(&hcsr04_devp->lock);
+        //  mutex_lock(&hcsr04_devp->lock);
         for(i=0;i<hcsr04_devp->num_samples_per_measurement+2;i++){
             /*Trigger pulse to take nth Measurement*/
             triggerPulse(hcsr04_devp);
@@ -101,7 +105,7 @@ void measure_distance(struct work_struct *hcsr04_wq){
                 hcsr04_devp->trig_time = 0;
                 hcsr04_devp->echo_time = 0;
                 mdelay(hcsr04_devp->sampling_period);
-                mutex_unlock(&hcsr04_devp->lock);
+                // mutex_unlock(&hcsr04_devp->lock);
                 continue;
             }
             
@@ -118,7 +122,7 @@ void measure_distance(struct work_struct *hcsr04_wq){
                 hcsr04_devp->trig_time = 0;
                 hcsr04_devp->echo_time = 0;
                 mdelay(hcsr04_devp->sampling_period);
-                mutex_unlock(&hcsr04_devp->lock);
+                // mutex_unlock(&hcsr04_devp->lock);
                 continue;
             }
             DPRINTK("Time Diff %lld \t ", time);
@@ -147,27 +151,9 @@ void measure_distance(struct work_struct *hcsr04_wq){
         sum = div_u64(sum, hcsr04_devp->num_samples_per_measurement);
         average_distance = sum;
         DALERT("#AVERAGE_DISTANCE: %d \n", average_distance);
-        // writeToCircularBuffer(average_distance, native_read_tsc(),hcsr04_devp);
-        send_distance(GROUP0, average_distance);
-        mutex_unlock(&hcsr04_devp->sampleRunning);
+        send_distance(GROUP0, average_distance); /*Relaying back to the user*/
     }
-    terminate_operation(GROUP0);
-}
-
-
-/*Function to spawn k-thread*/
-static int spawn_thread_display_pattern(struct hcsr04_dev *hcsr04_devp, uint16_t *pattern){
-    // /*Initialize the work and assign the requried parameters*/
-    // INIT_WORK(&hcsr04_devp->test_led_wq->work, send_pattern);
-    // hcsr04_devp->test_led_wq->parameter = pattern;
-    // DALERT("About to spawn thread \n");
-    // schedule_work(&hcsr04_devp->test_led_wq->work);
-    // hcsr04_devp->isWorkInitialized=1;
-    static struct task_struct *worker_task;
-    worker_task =  kthread_create(send_pattern,(void *)pattern,"thread");
-    kthread_bind(worker_task,get_cpu());
-    wake_up_process(worker_task);
-    return 0;
+    terminate_operation(GROUP0); /*Termination command to indicate that measurement is done */
 }
 
 
@@ -227,13 +213,14 @@ bool isValidPin(int pinNum, int isTriggerPin){
 /* A Callback function to handle triggered Interrupts */
 static irq_handler_t handleEchoTriggerRisingAndFalling(unsigned int irq, void *dev_id){
     struct hcsr04_dev *fileData = (struct hcsr04_dev *)dev_id;
-    
+    unsigned long flags;
+    spin_lock_irqsave(&sp_lock_irq, flags);
     if(gpio_get_value(fileData->echo_pin.gpio_pin)){
         fileData->trig_time = native_read_tsc();
     }else{
         fileData->echo_time = native_read_tsc();
     }
-
+    spin_unlock_irqrestore(&sp_lock_irq, flags);
     return (irq_handler_t) IRQ_HANDLED;
 }
 
@@ -256,21 +243,11 @@ int configure_irq_handler(struct hcsr04_dev *fileData){
     return 0;
 }
 
-void unregister_pin(struct hcsr04_dev *fileData, int isTrigger){
-    if(isTrigger){
-        if(fileData->trigger_pin.gpio_pin >= 0){
-            gpio_free(fileData->trigger_pin.gpio_pin);
-        }
-        if(fileData->trigger_pin.mux1 >= 0){
-            gpio_free(fileData->trigger_pin.mux1);
-        }
-        if(fileData->trigger_pin.pull >= 0){
-            gpio_free(fileData->trigger_pin.pull);
-        }
-        if(fileData->trigger_pin.shift_pin >= 0){
-            gpio_free(fileData->trigger_pin.shift_pin);
-        }
-    }else{
+/*Unregistering the gpio pins*/
+void unregister_pin(struct hcsr04_dev *fileData, int select){
+    switch (select)
+    {
+    case 0:
         free_irq(fileData->irq_number, fileData);
         if(fileData->echo_pin.gpio_pin >= 0){
             gpio_free(fileData->echo_pin.gpio_pin);
@@ -278,15 +255,57 @@ void unregister_pin(struct hcsr04_dev *fileData, int isTrigger){
         if(fileData->echo_pin.mux1 >= 0){
             gpio_free(fileData->echo_pin.mux1);
         }
+        if(fileData->echo_pin.mux2 >= 0){
+            gpio_free(fileData->echo_pin.mux2);
+        }
         if(fileData->echo_pin.pull >= 0){
             gpio_free(fileData->echo_pin.pull);
         }
         if(fileData->echo_pin.shift_pin >= 0){
             gpio_free(fileData->echo_pin.shift_pin);
         }
+        break;
+    case 1:
+        if(fileData->trigger_pin.gpio_pin >= 0){
+            gpio_free(fileData->trigger_pin.gpio_pin);
+        }
+        if(fileData->trigger_pin.mux1 >= 0){
+            gpio_free(fileData->trigger_pin.mux1);
+        }
+        if(fileData->trigger_pin.mux2 >= 0){
+            gpio_free(fileData->trigger_pin.mux2);
+        }
+        if(fileData->trigger_pin.pull >= 0){
+            gpio_free(fileData->trigger_pin.pull);
+        }
+        if(fileData->trigger_pin.shift_pin >= 0){
+            gpio_free(fileData->trigger_pin.shift_pin);
+        }
+        break;
+    case 2:
+        if(fileData->chip_select_pin.gpio_pin >= 0){
+            gpio_free(fileData->chip_select_pin.gpio_pin);
+        }
+        if(fileData->chip_select_pin.mux1 >= 0){
+            gpio_free(fileData->chip_select_pin.mux1);
+        }
+        if(fileData->chip_select_pin.mux2 >= 0){
+            gpio_free(fileData->chip_select_pin.mux2);
+        }
+        if(fileData->chip_select_pin.pull >= 0){
+            gpio_free(fileData->chip_select_pin.pull);
+        }
+        if(fileData->chip_select_pin.shift_pin >= 0){
+            gpio_free(fileData->chip_select_pin.shift_pin);
+        }
+        break;
+    default:
+
+        break;
     }
 }
 
+/*Handling the registration of gpio pins*/
 int configure_pin_mux(int gpio, struct hcsr04_dev *fileData, int isTrigger){
  
     int ret;
@@ -352,6 +371,7 @@ int configure_pin_mux(int gpio, struct hcsr04_dev *fileData, int isTrigger){
                 }
                 DPRINTK("GPIO 64 got configured \n");
                 gpio_set_value_cansleep(76, 0);
+                fileData->trigger_pin.mux2 = 64;
             }else if(mux_pin == 44){
                 if(gpio_request(72, pin_var)){
                     DPRINTK("Unable to register pin: 72 \n");
@@ -359,6 +379,9 @@ int configure_pin_mux(int gpio, struct hcsr04_dev *fileData, int isTrigger){
                 }
                 DPRINTK("GPIO 72 got configured \n");
                 gpio_set_value_cansleep(72, 0);
+                fileData->trigger_pin.mux2 = 72;
+            }else{
+                fileData->trigger_pin.mux2 = -1;
             }
         }
     }else{
@@ -423,6 +446,8 @@ int configure_pin_mux(int gpio, struct hcsr04_dev *fileData, int isTrigger){
                 }
                 DPRINTK("MUX 64 got configured \n");
                 gpio_set_value_cansleep(76, 0);
+
+                fileData->echo_pin.mux2 = 64;
             }else if(mux_pin == 44){
                 if(gpio_request(72, pin_var)){
                     DPRINTK("Unable to register pin: 72 \n");
@@ -430,6 +455,9 @@ int configure_pin_mux(int gpio, struct hcsr04_dev *fileData, int isTrigger){
                 }
                 DPRINTK("MUX 72 got configured \n");
                 gpio_set_value_cansleep(72, 0);
+                fileData->echo_pin.mux2 = 72;
+            }else{
+                fileData->echo_pin.mux2 = -1;
             }
         }
 
@@ -444,14 +472,12 @@ int configure_pin_mux(int gpio, struct hcsr04_dev *fileData, int isTrigger){
      if(isTrigger){
         fileData->trigger_pin.gpio_pin = gpio_pin;
         fileData->trigger_pin.mux1 = mux_pin;
-        fileData->trigger_pin.mux2 = mux_pin;
         fileData->trigger_pin.pull = pull_pin;
         fileData->trigger_pin.shift_pin = shift_pin;
         fileData->trigger_pin.digitalPin = gpio;
     }else{
         fileData->echo_pin.gpio_pin = gpio_pin;
         fileData->echo_pin.mux1 = mux_pin;
-        fileData->echo_pin.mux2 = mux_pin;
         fileData->echo_pin.pull = pull_pin;
         fileData->echo_pin.shift_pin = shift_pin;
         fileData->echo_pin.digitalPin = gpio;
@@ -488,6 +514,7 @@ int configure_IO_pins(config_input *input,struct hcsr04_dev *fileData){
     return -EINVAL;
 }
 
+/*Method to send distance to the user*/
 static void send_distance(unsigned int group, int distance){
     void *header;
     int res, flags = GFP_ATOMIC;
@@ -504,12 +531,11 @@ static void send_distance(unsigned int group, int distance){
         DALERT("Error in creating the sk_buf header \n");
         return;
     }
-
-    snprintf(msg, MAX_BUF_LENGTH, "Hello group %s\n", genl_test_mcgrp_names[group]);
-    nla_put_flag(sk_buf, RET_VAL_SUCCESS);
-    res = nla_put_u32(sk_buf,DISTANCE_MEASURE, distance);
+    snprintf(msg, MAX_BUF_LENGTH, "Sending to the group %s\n", genl_test_mcgrp_names[group]);
+    nla_put_flag(sk_buf, RET_VAL_SUCCESS_ATTR);
+    res = nla_put_u32(sk_buf,DISTANCE_MEASURE_ATTR, distance);
     if (res) {
-        printk(KERN_ERR "%d: err %d ", __LINE__, res);
+        DALERT("%d: err %d ", __LINE__, res);
         return;
     }
 
@@ -533,10 +559,10 @@ static void terminate_operation(unsigned int group){
         DALERT("Error in creating the sk_buf header \n");
         return;
     }
-    res = nla_put_flag(sk_buf, RET_VAL_SUCCESS);
-    res = nla_put_flag(sk_buf, TERMINATE_OPERATION);
+    res = nla_put_flag(sk_buf, RET_VAL_SUCCESS_ATTR);
+    res = nla_put_flag(sk_buf, TERMINATE_OPERATION_ATTR);
     if (res) {
-        printk(KERN_ERR "%d: err %d ", __LINE__, res);
+        DALERT("%d: err %d ", __LINE__, res);
         return;
     }
 
@@ -562,9 +588,9 @@ static void send_message_to_user_processes(unsigned int group){
         goto nlmsg_fail;
     }
 
-    res = nla_put_flag(sk_buf, RET_VAL_SUCCESS);
+    res = nla_put_flag(sk_buf, RET_VAL_SUCCESS_ATTR);
     if (res) {
-        printk(KERN_ERR "%d: err %d ", __LINE__, res);
+        DALERT("%d: err %d ", __LINE__, res);
         goto nlmsg_fail;
     }
 
@@ -581,15 +607,15 @@ nlmsg_fail:
 static int configure_hcsr04_device (struct sk_buff* sk_buf, struct genl_info* info){
     config_input input_pins;
     setparam_input input_params;
-    if(!info->attrs[HCSR04_TRIGGER_PIN] || !info->attrs[HCSR04_ECHO_PIN] || !info->attrs[HCSR04_SAMPLING_PERIOD] || !info->attrs[HCSRO4_NUMBER_SAMPLES]){
+    if(!info->attrs[HCSR04_TRIGGER_PIN_ATTR] || !info->attrs[HCSR04_ECHO_PIN_ATTR] || !info->attrs[HCSR04_SAMPLING_PERIOD_ATTR] || !info->attrs[HCSRO4_NUMBER_SAMPLES_ATTR]){
         DALERT("Empty data is sent from the user. Exiting... \n");
         return -EINVAL;
     }
 
-    input_pins.echo_pin = nla_get_u32(info->attrs[HCSR04_ECHO_PIN]);
-    input_pins.trigger_pin =  nla_get_u32(info->attrs[HCSR04_TRIGGER_PIN]);
-    input_params.sampling_period = nla_get_u32(info->attrs[HCSR04_SAMPLING_PERIOD]);
-    input_params.num_samples = nla_get_u32(info->attrs[HCSRO4_NUMBER_SAMPLES]);
+    input_pins.echo_pin = nla_get_u32(info->attrs[HCSR04_ECHO_PIN_ATTR]);
+    input_pins.trigger_pin =  nla_get_u32(info->attrs[HCSR04_TRIGGER_PIN_ATTR]);
+    input_params.sampling_period = nla_get_u32(info->attrs[HCSR04_SAMPLING_PERIOD_ATTR]);
+    input_params.num_samples = nla_get_u32(info->attrs[HCSRO4_NUMBER_SAMPLES_ATTR]);
 
     if(configure_IO_pins(&input_pins, hcsr04_devp) < 0){
         DALERT("Configuring HCSR04 I/O pins failed");
@@ -607,9 +633,11 @@ static void transfer_complete(void *context){
     DALERT("The transfer is completed successfully");
 }
 
+/*Clear the matrix Display*/
 static void clear_display(struct spi_device *spi){
     uint16_t pattern1[16]={0x0100,0x0200,0x0300,0x0400,0x0500,0x0600,0x0700,0x0800};
     int i=0;
+    int cs_pin = 0;
     uint16_t send[1];
     struct spi_message sp_msg;
     struct spi_transfer spi_transfer1={
@@ -622,7 +650,7 @@ static void clear_display(struct spi_device *spi){
         .cs_change = 1,
     };
     
-
+    cs_pin = hcsr04_devp->chip_select_pin.gpio_pin;
     spi_message_init(&sp_msg);
     sp_msg.complete=&transfer_complete;
     spi_message_add_tail((void *)&spi_transfer1, &sp_msg);
@@ -630,20 +658,18 @@ static void clear_display(struct spi_device *spi){
 	spi_sync(spi, &sp_msg);
     for(i=0;i<8;i++){
         send[0] = pattern1[0];
-        gpio_set_value(15,0);       
+        gpio_set_value(cs_pin,0);       
         spi_sync(spi, &sp_msg);
-        gpio_set_value(15,1);
+        gpio_set_value(cs_pin,1);
     }
 }
 
-static int send_pattern(void *patternn){
-
-    // struct work_queue_led *wq = container_of(hcsr04_wq, struct work_queue_led, work);
-    uint16_t *pattern = (uint16_t *)patternn;
-    
+/*Send pattern to the matrix led*/
+void send_pattern(uint16_t *pattern){
     uint16_t send[1];
     struct spi_message sp_msg;
     int i=0;
+    int cs_pin;
     struct spi_transfer spi_transfer={
         .tx_buf = send,
         .rx_buf = 0,
@@ -653,7 +679,8 @@ static int send_pattern(void *patternn){
         .delay_usecs = 1,
         .cs_change = 1,
     };
-    mutex_lock(&hcsr04_devp->sampleRunning);
+    cs_pin = hcsr04_devp->chip_select_pin.gpio_pin;
+    
     spi_message_init(&sp_msg);
     sp_msg.complete=&transfer_complete;
     spi_message_add_tail((void *)&spi_transfer, &sp_msg);
@@ -662,29 +689,28 @@ static int send_pattern(void *patternn){
     
     for(i=0;i<8;i++){
         send[0] = pattern[i];
-        gpio_set_value(15,0);       
+        gpio_set_value(cs_pin,0);       
         spi_sync(hcsr04_devp->found_device, &sp_msg);
-        gpio_set_value(15,1);
-
-        mdelay(hcsr04_devp->pattern_delay);
+        gpio_set_value(cs_pin,1);
     }
+    // mdelay(100);
     DALERT("Done sending the messages %d %d %d ", sp_msg.status, sp_msg.actual_length, sp_msg.frame_length);
-    mutex_unlock(&hcsr04_devp->lock);
-    
-    return 0;
+    // mutex_unlock(&hcsr04_devp->lock);
 }
 
+
+/*Base matrix setup to configure the properties*/
 static int setup_device(struct spi_device *spi){
     struct spi_message sp_msg;
-
+    int cs_pin;
     uint16_t addr_intensity = 0x0900;
     uint16_t addr_decode = 0x0A0F;
     uint16_t addr_scan_limit = 0x0B07;
     uint16_t addr_shutdown = 0x0C01;
-    // uint16_t pattern[8] ={0x0C,0x01,0x09,0x00,0x0A,0x0F,0x0B,0x07};
 
 	uint16_t sendData[1];    		
-
+    
+    /*Setting up the base transfer operation properties*/
     struct spi_transfer spi_transfer = {
         .tx_buf = sendData,
         .rx_buf = 0,
@@ -694,80 +720,191 @@ static int setup_device(struct spi_device *spi){
         .delay_usecs = 1,
         .cs_change = 1,
     };
-
+    cs_pin = hcsr04_devp->chip_select_pin.gpio_pin;
     spi_message_init(&sp_msg);
     sp_msg.complete=&transfer_complete;
     spi_message_add_tail((void *)&spi_transfer, &sp_msg);
 	spi_sync(spi, &sp_msg);
 
+    /*Setting up the shutdown register to normal mode*/
     sendData[0] = addr_shutdown;
-    gpio_set_value(15,0);       
+    gpio_set_value(cs_pin,0);       
     spi_sync(spi, &sp_msg);
-    gpio_set_value(15,1);
+    gpio_set_value(cs_pin,1);
 
+    /*Setting up the address register to maximun */
     sendData[0] = addr_intensity;
-    gpio_set_value(15,0);       
+    gpio_set_value(cs_pin,0);       
     spi_sync(spi, &sp_msg);
-    gpio_set_value(15,1);
+    gpio_set_value(cs_pin,1);
 
+    /*setting up the address decode register */
     sendData[0] = addr_decode;
-    gpio_set_value(15,0);       
+    gpio_set_value(cs_pin,0);       
     spi_sync(spi, &sp_msg);
-    gpio_set_value(15,1);
+    gpio_set_value(cs_pin,1);
 
+    /*Setting up the scan limit register */
     sendData[0] = addr_scan_limit;
-    gpio_set_value(15,0);       
+    gpio_set_value(cs_pin,0);       
     spi_sync(spi, &sp_msg);
-    gpio_set_value(15,1);	
+    gpio_set_value(cs_pin,1);	
 
+    /*Clearing the display*/
     clear_display(spi);
-    DALERT("Done sending the messages ------------- %d %d %d ", sp_msg.status, sp_msg.actual_length, sp_msg.frame_length);	
+
     return 0;
 }
 
-static int configure_max7219_device (struct sk_buff* sk_buf, struct genl_info* info){
-    printk("About to configure max7219 \n");
+/*Configuring the CS pin*/
+static int configure_chip_select(int cs_pin){
+    int gpio_pin = lookupTable[0][cs_pin];
+    int shift_pin = lookupTable[1][cs_pin];
+    int pull_pin = lookupTable[2][cs_pin];
+    int mux_pin = lookupTable[3][cs_pin];
+    char pin_var[20];
+
+    if(cs_pin == hcsr04_devp->chip_select_pin.digitalPin){
+        DALERT("Required pin is already set. No changes needed. Exiting... \n");
+        return 0;
+    }
+
+    if(hcsr04_devp->chip_select_pin.digitalPin > -1){
+        unregister_pin(hcsr04_devp, 2);
+    }
+
+    if(shift_pin > -1){
+         sprintf(pin_var, "%s%d", "gpio", shift_pin);
+        if(gpio_request(shift_pin, pin_var)){
+            return -EINVAL;
+        }
+        gpio_direction_output(shift_pin,0);
+        DPRINTK("Registerd shift: %d \n", shift_pin);
+    }
+
+    if(pull_pin > -1){
+         sprintf(pin_var, "%s%d", "gpio", pull_pin);
+        if(gpio_request(pull_pin, pin_var)){
+            return -EINVAL;
+            
+        }
+        gpio_direction_output(pull_pin,0);
+        DPRINTK("Registerd pull: %d \n", pull_pin);
+    }
+     if(gpio_pin > -1){
+         sprintf(pin_var, "%s%d", "gpio", gpio_pin);
+        if(gpio_request(gpio_pin, pin_var)){
+            return -EINVAL;
+        }
+        gpio_direction_output(gpio_pin,0);
+        DPRINTK("Registerd gpio: %d \n", gpio_pin);
+    }
+
+    if(mux_pin > -1){
+        sprintf(pin_var, "%s%d", "gpio", mux_pin);
+        if(gpio_request(mux_pin, "")){
+            return -EINVAL;
+        }
+        DPRINTK("Registerd mux: %d \n", mux_pin);
+
+        gpio_direction_output(mux_pin,0);
+        if(mux_pin == 76){
+                sprintf(pin_var, "%s%d", "gpio", 64);
+                if(gpio_request(64, pin_var)){
+                    DPRINTK("Unable to register pin: 64 \n");
+                    return -EINVAL;
+                }
+                DPRINTK("MUX 64 got configured \n");
+                gpio_direction_output(76, 0);
+                hcsr04_devp->chip_select_pin.mux2 = 64;
+                printk("Registerd gpio: 64 \n");
+        }else if(mux_pin == 44){
+                sprintf(pin_var, "%s%d", "gpio", 72);
+                if(gpio_request(72, pin_var)){
+                    DPRINTK("Unable to register pin: 72 \n");
+                    return -EINVAL;
+                }
+                DPRINTK("MUX 72 got configured \n");
+                gpio_direction_output(72, 0);
+                hcsr04_devp->chip_select_pin.mux2 = 72;
+                printk("Registerd gpio: 72 \n");
+        }else{
+            hcsr04_devp->chip_select_pin.mux2 = -1;
+        }
+    }
+
     
+    /*Initializing the found pins*/
+    hcsr04_devp->chip_select_pin.digitalPin = cs_pin;
+    hcsr04_devp->chip_select_pin.gpio_pin = gpio_pin;
+    hcsr04_devp->chip_select_pin.mux1 = mux_pin;
+    hcsr04_devp->chip_select_pin.pull = pull_pin;
+    hcsr04_devp->chip_select_pin.shift_pin = shift_pin;
+
+    /*Setting up the found spi_device(Matrix Led)*/
+    if(setup_device(hcsr04_devp->found_device)){
+        DALERT("Error in setting up the device \n");
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
+/*Callback to configure the matrix led device */
+static int configure_max7219_device (struct sk_buff* sk_buf, struct genl_info* info){
+    int chip_select;
+    printk("About to configure max_7219 \n");
+    if(!info->attrs[MAX7219_CS_PIN_ATTR]){
+        DALERT("Pin number received \n");
+        return -EINVAL;
+    }
+
+    chip_select = nla_get_u32(info->attrs[MAX7219_CS_PIN_ATTR]);
+
+    if(configure_chip_select(chip_select)){
+        DALERT("Failed to configure chip select pins. \n");
+        return -EINVAL;
+    }
+    DALERT("Chip Select Pin Configured Successfully \n");
     send_message_to_user_processes(GROUP0);
     return 0;
 }
+
+/*Callback to initiate the distance measurement*/
 static int start_distance_measurement (struct sk_buff* sk_buf, struct genl_info* info){
-    int secondsToRun;
+    int iterationsToRun;
     DALERT("About to start the distance measurment \n");
 
-    if(!info->attrs[HCSR04_SECONDS_TO_RUN]){
-        secondsToRun = 60;  //Assigning a default value if there is no data is sent.
+    if(!info->attrs[HCSR04_SECONDS_TO_RUN_ATTR]){
+        iterationsToRun = 20;  //Assigning a default value if there is no data is sent.
     }else{  
-        secondsToRun = nla_get_u32(info->attrs[HCSR04_SECONDS_TO_RUN]);
+        iterationsToRun = nla_get_u32(info->attrs[HCSR04_SECONDS_TO_RUN_ATTR]);
     }
 
+    /*Number of iterations to be taken*/
+    hcsr04_devp->timeToStopMeasurment = iterationsToRun;
 
-    hcsr04_devp->timeToStopMeasurment = secondsToRun;
-    DALERT("%d", hcsr04_devp->timeToStopMeasurment);
+    /*Initializing it to the work queue*/
     spawn_thread_distance_measurement(hcsr04_devp);
     return 0;
 }
 
+/*Callaback to receive the patter from led and send back to the matrix led*/
 static int send_pattern_to_matrix_led (struct sk_buff* sk_buf, struct genl_info* info){
     uint16_t *data;
-    // DALERT("Sending Pattern to led \n");
 
-    if(!info->attrs[DISPLAY_PATTERN]){
+    if(!info->attrs[DISPLAY_PATTERN_ATTR]){
         DALERT("No Pattern has been received \n");
         return 0;
     }
 
-    data = (uint16_t *)nla_data(info->attrs[DISPLAY_PATTERN]);
+    data = (uint16_t *)nla_data(info->attrs[DISPLAY_PATTERN_ATTR]);
 
-    if(!info->attrs[DELAY_TIME]){
-        DALERT("No delay time received \n");
-        return 0;
-    }
-    hcsr04_devp->pattern_delay = nla_get_u32(info->attrs[DELAY_TIME]);
-    spawn_thread_display_pattern(hcsr04_devp,data);
+    send_pattern(data);
     return 0;
 }
 
+/*Setting up the general operations/commands for the netlink family*/
 static const struct genl_ops genl_netlink_ops[] = {
     {
         .cmd = CONFIGURE_HCSR04,
@@ -795,6 +932,7 @@ static const struct genl_ops genl_netlink_ops[] = {
     },
 };
 
+/*Setting up the base Clock and DIN pins */
 int set_gpio_pins_for_max7219(void){
     if(gpio_request(24, "gpio24")){
         DALERT("Configuration failed \n");
@@ -834,28 +972,10 @@ int set_gpio_pins_for_max7219(void){
     gpio_direction_output(46,1);
 	gpio_direction_output(30,0);
 	gpio_direction_output(31,0);
-
-
-    if(gpio_request(42, "gpio42")){
-        DALERT("Configuration failed \n");
-        return -EINVAL;
-    }
-    if(gpio_request(43, "gpio43")){
-        DALERT("Configuration failed \n");
-        return -EINVAL;
-    }
-    if(gpio_request(15, "gpio15")){
-        DALERT("Configuration failed \n");
-        return -EINVAL;
-    }
-
-    gpio_direction_output(42,0);
-	gpio_direction_output(43,0);
-	gpio_direction_output(15,0);
-
     return 0;
 }
 
+/*Decongifure the default pins of matrix led*/
 void deconfigure_max7219(void){
     gpio_free(44);
     gpio_free(24);
@@ -865,18 +985,18 @@ void deconfigure_max7219(void){
     gpio_free(46);
     gpio_free(30);
     gpio_free(31);
-
-    gpio_free(42);
-    gpio_free(43);
-    gpio_free(15);
 }
 
+
+/*Keeping track of the multicast groups */
 static const struct genl_multicast_group genl_netlink_mcgrps[] = {
     [GROUP0] = { .name = MULTICAST_GROUP0, },
     [GROUP1] = { .name = MULTICAST_GROUP1, },
     [GROUP2] = { .name = MULTICAST_GROUP2, },
 };
 
+
+/*The primary configuration the genl_netlink_family*/
 static struct genl_family genl_netlink_family = {
     .name = NETLINK_FAMILY_NAME,
     .version = 1,
@@ -890,27 +1010,24 @@ static struct genl_family genl_netlink_family = {
 };
 
 
+/*Initializing the found spi device*/
 static int initializeDevice(void){
-    
+    /*Setting up the base gpio pins for the matrix led*/
     if(set_gpio_pins_for_max7219()){
         DALERT("Failed register gpio pins \n");
         return -EINVAL;
     }
-
     DALERT("GPIO pins are configured successfully for Led Matrix device\n");
-    DALERT("About to set up the device. \n");
-    if(setup_device(hcsr04_devp->found_device)){
-        DALERT("Failed to initialize the found device\n");
-        return -EINVAL;
-    }
     return 0;
 }
 
+/*On Removal removing the configured pins of the spi device. Only the primary pins */
 static int removeDevice(void){
     deconfigure_max7219();
     return 0;
 }
 
+/*Probe function to handle the found spi devices */
 static int spi_driver_probe(struct spi_device *spi){
     DALERT("Found a matching device. Device name: %s \n", spi->modalias);
     hcsr04_devp->found_device = spi;
@@ -924,6 +1041,7 @@ static int spi_driver_probe(struct spi_device *spi){
     return 0;
 }
 
+/*Remove function to handle the removal of spi device */
 static int spi_driver_remove(struct spi_device *spi){
     DALERT("Removing the device. \n");
 
@@ -935,7 +1053,7 @@ static int spi_driver_remove(struct spi_device *spi){
 
 
 /*
-*
+*Base configuration of the spi driver, to keep track of the list of possible spi-devices through id_table
 */
 static struct spi_driver spi_driver = {
     .id_table=spi_deviceId_table,
@@ -947,9 +1065,10 @@ static struct spi_driver spi_driver = {
     }
 };
 
-/************************************************************************************************************************************************************/
 
+/*Kernel Module Initialization*/
 static int __init spi_netlink_init(void){
+    /*Initializing the netlink family for communication */
     if(genl_register_family(&genl_netlink_family)){
         DALERT("Netlink family registration failed. \n");
         return -EINVAL;
@@ -970,15 +1089,18 @@ static int __init spi_netlink_init(void){
     /*Initializing the variables */
     hcsr04_devp->irq_number = 0;
     hcsr04_devp->isWorkInitialized = 0;
-    
+    hcsr04_devp->chip_select_pin.digitalPin = -1;
+    hcsr04_devp->echo_pin.digitalPin = -1;
+    hcsr04_devp->trigger_pin.digitalPin = -1;
+
     /*Initialize work queue*/
     hcsr04_devp->test_hcsr_wq = kmalloc(sizeof(struct work_queue_hcsr *), GFP_KERNEL);
-    hcsr04_devp->test_led_wq = kmalloc(sizeof(struct work_queue_led *), GFP_KERNEL);
 
     /*Initializing mutexes*/
     mutex_init(&hcsr04_devp->lock);
     mutex_init(&hcsr04_devp->sampleRunning);
 
+    /*Registering the spi_driver */
     if(spi_register_driver(&spi_driver)){
         DALERT("Failed to register spi driver. \n");
         return -EINVAL;
@@ -987,6 +1109,7 @@ static int __init spi_netlink_init(void){
     return 0;
 }
 
+/*Unmounting the kernel module */
 static void spi_netlink_exit(void){
     DALERT("About to unregister the driver and the genl family \n");
     genl_unregister_family(&genl_netlink_family);
@@ -994,8 +1117,9 @@ static void spi_netlink_exit(void){
     spi_unregister_driver(&spi_driver);
     DALERT("Driver and Generic unregistration successful.\n");
 
-    unregister_pin(hcsr04_devp, true);
-    unregister_pin(hcsr04_devp, false);
+    unregister_pin(hcsr04_devp, 0);
+    unregister_pin(hcsr04_devp, 1);
+    unregister_pin(hcsr04_devp, 2);
 }
 
 module_init(spi_netlink_init);
