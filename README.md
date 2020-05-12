@@ -4,7 +4,7 @@
 
 # About the project
 
-The project is designed in such a way that, the driver will 
+The project is designed in such a way that, the spi-driver will be probing for spi-device. We can register device/driver in any order and the probe function will get called to initialize the device/drivers
 
 I've disabled the debug information, and printing only the important information as ALERT which can as well be controlled by adding/removing the macros.
 
